@@ -20,6 +20,7 @@ import com.termux.R;
 import com.termux.shared.interact.ShareUtils;
 import com.termux.shared.termux.shell.command.runner.terminal.TermuxSession;
 import com.termux.shared.termux.interact.TextInputDialogUtils;
+import com.termux.app.OpenCodeBootstrap;
 import com.termux.app.TermuxActivity;
 import com.termux.shared.termux.terminal.TermuxTerminalSessionClientBase;
 import com.termux.shared.termux.TermuxConstants;
@@ -35,6 +36,7 @@ import com.termux.terminal.TextStyle;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.Properties;
 
 /** The {@link TerminalSessionClient} implementation that may require an {@link Activity} for its interface methods. */
@@ -359,6 +361,38 @@ public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionCl
             if (termuxSession != null)
                 termuxSession.getExecutionCommand().shellName = text;
         }
+    }
+
+    /**
+     * Start the OpenCode TUI in the given session.
+     *
+     * <p>The command is typed into the pty of the session, so OpenCode runs inside the normal
+     * Termux shell and has therefore access to the whole Termux environment.</p>
+     */
+    public void startOpenCode(@Nullable final TerminalSession session) {
+        if (session == null) return;
+
+        TerminalSession currentSession = mActivity.getCurrentSession();
+        if (currentSession != null && currentSession != session)
+            setCurrentSession(session);
+
+        // Give the shell a moment to start before the command is typed.
+        mActivity.getTerminalView().postDelayed(() -> {
+            byte[] command = (OpenCodeBootstrap.OPENCODE_COMMAND + "\r").getBytes(StandardCharsets.UTF_8);
+            session.write(command, 0, command.length);
+        }, 500);
+    }
+
+    /** Interrupt whatever is running in the current session and start OpenCode again. */
+    public void restartOpenCode() {
+        final TerminalSession session = mActivity.getCurrentSession();
+        if (session == null) return;
+
+        // Ctrl+C to interrupt a running command or the TUI.
+        byte[] interrupt = new byte[] {3};
+        session.write(interrupt, 0, interrupt.length);
+
+        mActivity.getTerminalView().postDelayed(() -> startOpenCode(session), 600);
     }
 
     public void addNewSession(boolean isFailSafe, String sessionName) {

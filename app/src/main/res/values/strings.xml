@@ -235,4 +235,20 @@
     <!-- Donate Preference -->
     <string name="donate_preference_title">Donate</string>
 
+
+
+    <!-- OpenCode -->
+    <string name="opencode_installing">Installing OpenCode…</string>
+    <string name="opencode_install_failed_title">OpenCode installation failed</string>
+    <string name="opencode_log_location">The details are in %1$s</string>
+    <string name="opencode_not_installed">OpenCode is not installed yet. It is being installed now…</string>
+    <string name="opencode_started">Starting OpenCode…</string>
+    <string name="opencode_ready">OpenCode %1$s is ready</string>
+    <string name="opencode_prompt_hint">Ask OpenCode…</string>
+    <string name="opencode_prompt_send">Send</string>
+    <string name="action_restart_opencode">Restart OpenCode</string>
+    <string name="action_update_opencode">Install/Update OpenCode</string>
+    <string name="action_toggle_opencode_prompt">Toggle the OpenCode input bar</string>
+    <string name="opencode_update_requested">Updating OpenCode, watch the notification…</string>
+
 </resources>

@@ -30,6 +30,7 @@ import com.termux.R;
 import com.termux.app.api.file.FileReceiverActivity;
 import com.termux.app.terminal.TermuxActivityRootView;
 import com.termux.app.terminal.TermuxTerminalSessionActivityClient;
+import com.termux.app.terminal.FloatingPromptInput;
 import com.termux.app.terminal.io.TermuxTerminalExtraKeys;
 import com.termux.shared.activities.ReportActivity;
 import com.termux.shared.activity.ActivityUtils;
@@ -139,6 +140,11 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
     TermuxSessionsListViewController mTermuxSessionListViewController;
 
     /**
+     * The floating input bar used to type into the OpenCode TUI.
+     */
+    private FloatingPromptInput mOpenCodePromptInput;
+
+    /**
      * The {@link TermuxActivity} broadcast receiver for various things like terminal style configuration changes.
      */
     private final BroadcastReceiver mTermuxActivityBroadcastReceiver = new TermuxActivityBroadcastReceiver();
@@ -188,6 +194,9 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
     private static final int CONTEXT_MENU_HELP_ID = 7;
     private static final int CONTEXT_MENU_SETTINGS_ID = 8;
     private static final int CONTEXT_MENU_REPORT_ID = 9;
+    private static final int CONTEXT_MENU_RESTART_OPENCODE_ID = 12;
+    private static final int CONTEXT_MENU_UPDATE_OPENCODE_ID = 13;
+    private static final int CONTEXT_MENU_TOGGLE_OPENCODE_PROMPT_ID = 14;
 
     private static final String ARG_TERMINAL_TOOLBAR_TEXT_INPUT = "terminal_toolbar_text_input";
     private static final String ARG_ACTIVITY_RECREATED = "activity_recreated";
@@ -250,6 +259,8 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         setNewSessionButtonView();
 
         setToggleKeyboardView();
+
+        mOpenCodePromptInput = new FloatingPromptInput(this);
 
         registerForContextMenu(mTerminalView);
 
@@ -319,7 +330,22 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         // notification with the crash details if it did
         TermuxCrashUtils.notifyAppCrashFromCrashLogFile(this, LOG_TAG);
 
+        // Make sure that the OpenCode runtime is still complete, the binary may have been
+        // replaced by the auto updater of OpenCode in the meantime.
+        OpenCodeBootstrap.checkRuntime(this);
+
         mIsOnResumeAfterOnCreate = false;
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+
+        if (intent == null) return;
+
+        // The 'oc-install' command asks the app to install or update the OpenCode runtime.
+        if (intent.getBooleanExtra(OpenCodeBootstrap.EXTRA_FORCE_UPDATE, false))
+            OpenCodeBootstrap.requestUpdate(this);
     }
 
     @Override
@@ -394,6 +420,10 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         final Intent intent = getIntent();
         setIntent(null);
 
+        // The 'oc-install' command asks the app to install or update the OpenCode runtime.
+        if (intent != null && intent.getBooleanExtra(OpenCodeBootstrap.EXTRA_FORCE_UPDATE, false))
+            OpenCodeBootstrap.requestUpdate(TermuxActivity.this);
+
         if (mTermuxService.isTermuxSessionsEmpty()) {
             if (mIsVisible) {
                 TermuxInstaller.setupBootstrapIfNeeded(TermuxActivity.this, () -> {
@@ -403,7 +433,17 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
                         if (intent != null && intent.getExtras() != null) {
                             launchFailsafe = intent.getExtras().getBoolean(TERMUX_ACTIVITY.EXTRA_FAILSAFE_SESSION, false);
                         }
-                        mTermuxTerminalSessionActivityClient.addNewSession(launchFailsafe, null);
+                        // The OpenCode runtime must be ready before the agent is started, it is
+                        // installed on the first run and repaired when it is broken.
+                        OpenCodeBootstrap.setupIfNeeded(TermuxActivity.this, () -> {
+                            if (mTermuxService == null) return; // Activity might have been destroyed.
+                            try {
+                                mTermuxTerminalSessionActivityClient.addNewSession(launchFailsafe, null);
+                                startOpenCode();
+                            } catch (WindowManager.BadTokenException e) {
+                                // Activity finished - ignore.
+                            }
+                        });
                     } catch (WindowManager.BadTokenException e) {
                         // Activity finished - ignore.
                     }
@@ -648,6 +688,9 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         menu.add(Menu.NONE, CONTEXT_MENU_HELP_ID, Menu.NONE, R.string.action_open_help);
         menu.add(Menu.NONE, CONTEXT_MENU_SETTINGS_ID, Menu.NONE, R.string.action_open_settings);
         menu.add(Menu.NONE, CONTEXT_MENU_REPORT_ID, Menu.NONE, R.string.action_report_issue);
+        menu.add(Menu.NONE, CONTEXT_MENU_RESTART_OPENCODE_ID, Menu.NONE, R.string.action_restart_opencode);
+        menu.add(Menu.NONE, CONTEXT_MENU_TOGGLE_OPENCODE_PROMPT_ID, Menu.NONE, R.string.action_toggle_opencode_prompt);
+        menu.add(Menu.NONE, CONTEXT_MENU_UPDATE_OPENCODE_ID, Menu.NONE, R.string.action_update_opencode);
     }
 
     /** Hook system menu to show context menu instead. */
@@ -697,6 +740,16 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
                 return true;
             case CONTEXT_MENU_REPORT_ID:
                 mTermuxTerminalViewClient.reportIssueFromTranscript();
+                return true;
+            case CONTEXT_MENU_RESTART_OPENCODE_ID:
+                restartOpenCode();
+                return true;
+            case CONTEXT_MENU_TOGGLE_OPENCODE_PROMPT_ID:
+                toggleOpenCodePrompt();
+                return true;
+            case CONTEXT_MENU_UPDATE_OPENCODE_ID:
+                OpenCodeBootstrap.requestUpdate(this);
+                showToast(getString(R.string.opencode_update_requested), true);
                 return true;
             default:
                 return super.onContextItemSelected(item);
@@ -903,6 +956,58 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
 
     public TermuxAppSharedProperties getProperties() {
         return mProperties;
+    }
+
+    /**
+     * Start the OpenCode TUI in the current session. The agent runs inside Termux, so it has
+     * access to the whole Termux environment (shell, package manager, files, …).
+     */
+    public void startOpenCode() {
+        if (mTermuxTerminalSessionActivityClient == null) return;
+
+        TerminalSession session = getCurrentSession();
+        if (session == null)
+            session = mTermuxTerminalSessionActivityClient.getCurrentStoredSessionOrLast();
+        if (session == null) return;
+
+        if (!OpenCodeBootstrap.isRuntimeComplete()) {
+            showToast(getString(R.string.opencode_not_installed), true);
+            OpenCodeBootstrap.requestUpdate(this);
+            return;
+        }
+
+        showToast(getString(R.string.opencode_started), false);
+        mTermuxTerminalSessionActivityClient.startOpenCode(session);
+
+        // Keep the device awake, the agent may run long commands.
+        acquireWakeLock();
+    }
+
+    /** Interrupt whatever is running and start OpenCode again. */
+    public void restartOpenCode() {
+        if (mTermuxTerminalSessionActivityClient == null) return;
+        mTermuxTerminalSessionActivityClient.restartOpenCode();
+    }
+
+    /** Show or hide the floating input bar used to type into the OpenCode TUI. */
+    public void toggleOpenCodePrompt() {
+        if (mOpenCodePromptInput == null) return;
+        mOpenCodePromptInput.toggle();
+    }
+
+    public FloatingPromptInput getOpenCodePromptInput() {
+        return mOpenCodePromptInput;
+    }
+
+    /** Acquire the wake lock of the service so that the device does not sleep while the agent works. */
+    private void acquireWakeLock() {
+        try {
+            Intent intent = new Intent(this, TermuxService.class);
+            intent.setAction(TermuxConstants.TERMUX_APP.TERMUX_SERVICE.ACTION_WAKE_LOCK);
+            startService(intent);
+        } catch (Exception e) {
+            Logger.logStackTraceWithMessage(LOG_TAG, "Failed to acquire the wake lock", e);
+        }
     }
 
 
