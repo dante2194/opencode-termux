@@ -464,8 +464,12 @@ public final class OpenCodeBootstrap {
                     status("WARNING: the downloaded build does not run on this device, keeping the installed one.");
                 } else {
                     linkTo(installed);
-                    writeTextFile(new File(PATCHED_MARKER_PATH), binaryStamp(installed));
-                    writeTextFile(new File(READY_MARKER_PATH), version);
+                    try {
+                        writeTextFile(new File(PATCHED_MARKER_PATH), binaryStamp(installed));
+                        writeTextFile(new File(READY_MARKER_PATH), version);
+                    } catch (IOException e) {
+                        throw new InstallException("Could not write the installation markers: " + e.getMessage());
+                    }
                 }
                 writeLaunchers();
             } finally {
