@@ -429,10 +429,8 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
                 TermuxInstaller.setupBootstrapIfNeeded(TermuxActivity.this, () -> {
                     if (mTermuxService == null) return; // Activity might have been destroyed.
                     try {
-                        boolean launchFailsafe = false;
-                        if (intent != null && intent.getExtras() != null) {
-                            launchFailsafe = intent.getExtras().getBoolean(TERMUX_ACTIVITY.EXTRA_FAILSAFE_SESSION, false);
-                        }
+                        final boolean launchFailsafe = (intent != null && intent.getExtras() != null) &&
+                            intent.getExtras().getBoolean(TERMUX_ACTIVITY.EXTRA_FAILSAFE_SESSION, false);
                         // The OpenCode runtime must be ready before the agent is started, it is
                         // installed on the first run and repaired when it is broken.
                         OpenCodeBootstrap.setupIfNeeded(TermuxActivity.this, () -> {

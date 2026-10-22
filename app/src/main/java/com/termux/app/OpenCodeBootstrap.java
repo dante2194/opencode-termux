@@ -1094,7 +1094,6 @@ public final class OpenCodeBootstrap {
         /* ------------------------------------------------------------------ process handling */
 
         private CmdResult run(List<String> cmd, long timeoutMs, boolean stream) {
-            Process process = null;
             StringBuilder output = new StringBuilder();
             try {
                 ProcessBuilder builder = new ProcessBuilder(cmd);
@@ -1104,7 +1103,8 @@ public final class OpenCodeBootstrap {
                 builder.directory(new File(HOME));
                 builder.redirectErrorStream(true);
 
-                process = builder.start();
+                // The process is used by the reader thread, so it must be final.
+                final Process process = builder.start();
 
                 final StringBuilder sink = output;
                 Thread reader = new Thread(() -> {
@@ -1142,7 +1142,7 @@ public final class OpenCodeBootstrap {
                         }
                         try {
                             Thread.sleep(PROCESS_POLL_INTERVAL_MS);
-                        } catch (InterruptedException e) {
+                        } catch (InterruptedException interrupted) {
                             Thread.currentThread().interrupt();
                             return new CmdResult(-1, output.toString(), "interrupted");
                         }
