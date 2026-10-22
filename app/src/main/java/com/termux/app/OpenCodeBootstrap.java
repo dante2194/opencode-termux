@@ -425,7 +425,9 @@ public final class OpenCodeBootstrap {
             if (!aptUpdate(true))
                 throw new InstallException("Could not refresh the package lists of the glibc repository.");
 
-            if (!aptInstall(Arrays.asList("glibc-runner", "patchelf", "tar")))
+            // 'termux-am' is needed by the 'oc-install' launcher, it asks the app to install
+            // or update the runtime.
+            if (!aptInstall(Arrays.asList("glibc-runner", "patchelf", "tar", "termux-am")))
                 Logger.logWarn(LOG_TAG, "Some of the helper packages could not be installed, continuing anyway.");
 
             // 'patchelf' links against libc++_shared.so, an old libc++ makes it die with

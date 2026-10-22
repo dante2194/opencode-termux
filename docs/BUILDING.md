@@ -7,9 +7,11 @@ This document describes how to build the APK of this fork from source.
 | Tool | Version | Notes |
 | --- | --- | --- |
 | JDK | 17 or newer | The build uses the toolchain of Gradle 8.x. |
-| Android SDK | Platform 36, Build-Tools 36 | `compileSdkVersion`/`targetSdkVersion` are defined in `app/build.gradle`. |
-| Android NDK | `29.0.14206865` | Needed for the `libtermux-exec` native library. The version is pinned in `app/build.gradle` and must match exactly. |
+| Android SDK | Platform 36, Build-Tools 36 | `compileSdkVersion=36` and `targetSdkVersion=28` are defined in `gradle.properties`. |
+| Android NDK | `29.0.14206865` | Needed for the `libtermux-exec` native library. The version is pinned in `gradle.properties` and must match exactly. |
 | Gradle | Provided by the wrapper | Do not install Gradle manually, use `./gradlew`. |
+
+The minimum Android version is Android 5.0 (`minSdkVersion=21`).
 
 The Termux bootstrap (`bootstrap*.zip`) is downloaded by the build from
 `https://github.com/termux/termux-packages/releases` — no extra setup is needed.
@@ -28,10 +30,10 @@ yes | sdkmanager --licenses
 sdkmanager "platforms;android-36" "ndk;29.0.14206865"
 ```
 
-The NDK version is read from `app/build.gradle`:
+The NDK version is read from `gradle.properties`:
 
-```gradle
-ndkVersion "29.0.14206865"
+```properties
+ndkVersion=29.0.14206865
 ```
 
 If your NDK has a different version, change it there — but keep in mind that the native
