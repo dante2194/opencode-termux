@@ -250,6 +250,7 @@
     <string name="opencode_ready">OpenCode %1$s is ready</string>
     <string name="opencode_prompt_hint">Ask OpenCode…</string>
     <string name="opencode_prompt_send">Send</string>
+    <string name="send">Send</string>
     <string name="action_restart_opencode">Restart OpenCode</string>
     <string name="action_update_opencode">Install/Update OpenCode</string>
     <string name="action_toggle_opencode_prompt">Toggle the OpenCode input bar</string>

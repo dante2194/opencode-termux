@@ -4,6 +4,7 @@ import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.EditText;
+import android.widget.ImageButton;
 
 import androidx.annotation.NonNull;
 import androidx.viewpager.widget.PagerAdapter;
@@ -58,13 +59,14 @@ public class TerminalToolbarViewPager {
             } else {
                 layout = inflater.inflate(R.layout.view_terminal_toolbar_text_input, collection, false);
                 final EditText editText = layout.findViewById(R.id.terminal_toolbar_text_input);
+                ImageButton sendButton = layout.findViewById(R.id.terminal_toolbar_send_button);
 
                 if (mSavedTextInput != null) {
                     editText.setText(mSavedTextInput);
                     mSavedTextInput = null;
                 }
 
-                editText.setOnEditorActionListener((v, actionId, event) -> {
+                View.OnClickListener sendListener = v -> {
                     TerminalSession session = mActivity.getCurrentSession();
                     if (session != null) {
                         if (session.isRunning()) {
@@ -76,6 +78,11 @@ public class TerminalToolbarViewPager {
                         }
                         editText.setText("");
                     }
+                };
+
+                sendButton.setOnClickListener(sendListener);
+                editText.setOnEditorActionListener((v, actionId, event) -> {
+                    sendListener.onClick(v);
                     return true;
                 });
             }
