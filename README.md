@@ -193,11 +193,20 @@ export ANDROID_HOME=$HOME/Android/Sdk
 
 The APKs are written to `app/build/outputs/apk/release/`.
 
+To build only for a single ABI (much faster):
+
+```bash
+TERMUX_BUILD_ABIS=arm64-v8a ./gradlew assembleDebug
+```
+
 The application name can be changed without touching the package name:
 
 ```bash
 TERMUX_APP_NAME="OpenCode Termux" ./gradlew assembleRelease
 ```
+
+Every push to `master` also builds the `arm64-v8a` APK with GitHub Actions — download it from the
+[Actions tab](https://github.com/manhduonghn/opencode-termux/actions).
 
 See [`docs/BUILDING.md`](docs/BUILDING.md) for the details (signing, ABI splits, CI).
 

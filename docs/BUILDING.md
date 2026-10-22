@@ -67,6 +67,24 @@ The build can produce one APK per ABI:
 
 Supported ABIs: `arm64-v8a`, `x86_64`, `armeabi-v7a`, `x86`.
 
+### Building a single ABI
+
+With `TERMUX_BUILD_ABIS` only the given ABIs are compiled. The split APKs are then disabled,
+only the bootstrap of the needed architecture is downloaded and the native library is only built
+for that ABI — the build is roughly four times faster:
+
+```bash
+TERMUX_BUILD_ABIS=arm64-v8a ./gradlew assembleDebug
+```
+
+The resulting APK is a single file that only contains the libraries of that ABI:
+
+```
+app/build/outputs/apk/debug/termux-app_apt-android-7-debug_arm64-v8a.apk
+```
+
+This is what the `Build arm64-v8a APK` workflow of this repository does on every push.
+
 > OpenCode itself is only published for `arm64` and `x64`. On a device with another ABI the
 > installer reports *"The CPU architecture … has no official OpenCode build"*, but the rest of
 > Termux works as usual.
@@ -153,8 +171,25 @@ temporary `sources.list` in `~/.opencode/apt/`.
 
 ## Continuous integration
 
-The workflows in `.github/workflows/` build the app on every push. They need the same JDK, SDK
-and NDK versions as described above.
+The workflow `.github/workflows/build-arm64-v8a.yml` builds the `arm64-v8a` debug APK on every
+push and pull request and attaches it to the run as an artifact
+(`opencode-termux-arm64-v8a-debug`).
+
+Download it from the [Actions tab](https://github.com/manhduonghn/opencode-termux/actions) of the
+repository, or with the GitHub CLI:
+
+```bash
+gh run list --repo manhduonghn/opencode-termux
+gh run download --repo manhduonghn/opencode-termux
+```
+
+> **Note** — pushing a file to `.github/workflows/` needs a token with the `workflow` scope. The
+> token of the maintainer did not have it, so the workflows of the Termux project were removed
+> from this fork. To enable the CI again, refresh the token with:
+>
+> ```bash
+> gh auth refresh -h github.com -s workflow
+> ```
 
 ## License
 
