@@ -10,6 +10,11 @@ ext {
     // by replacing $PREFIX since app code is dependant on the variant used to build the APK.
     // Currently supported values are: [ "apt-android-7" "apt-android-5" ]
     packageVariant = System.getenv("TERMUX_PACKAGE_VARIANT") ?: "apt-android-7" // Default: "apt-android-7"
+
+    // The ABIs to build for. When TERMUX_BUILD_ABIS is set (eg. "arm64-v8a"), only these ABIs are
+    // built, no split APKs are generated and only the needed bootstrap is downloaded. This makes a
+    // build for a single ABI much faster.
+    buildAbis = (System.getenv("TERMUX_BUILD_ABIS") ?: "").split(",").collect { it.trim() }.findAll { it }
 }
 
 android {
@@ -66,13 +71,21 @@ android {
             }
         }
 
-        splits {
-            abi {
-                enable ((gradle.startParameter.taskNames.any { it.contains("Debug") } && splitAPKsForDebugBuilds == "1") ||
-                    (gradle.startParameter.taskNames.any { it.contains("Release") } && splitAPKsForReleaseBuilds == "1"))
-                reset ()
-                include 'x86', 'x86_64', 'armeabi-v7a', 'arm64-v8a'
-                universalApk true
+        if (project.ext.buildAbis) {
+            // Build for a limited set of ABIs only. 'splits.abi' and 'ndk.abiFilters' cannot be
+            // used together, so the split APKs are disabled in this case.
+            ndk {
+                abiFilters.addAll(project.ext.buildAbis)
+            }
+        } else {
+            splits {
+                abi {
+                    enable ((gradle.startParameter.taskNames.any { it.contains("Debug") } && splitAPKsForDebugBuilds == "1") ||
+                        (gradle.startParameter.taskNames.any { it.contains("Release") } && splitAPKsForReleaseBuilds == "1"))
+                    reset ()
+                    include 'x86', 'x86_64', 'armeabi-v7a', 'arm64-v8a'
+                    universalApk true
+                }
             }
         }
     }
@@ -130,12 +143,14 @@ android {
 
     applicationVariants.all { variant ->
         variant.outputs.all { output ->
+            def abi = output.getFilter(com.android.build.OutputFile.ABI)
+            // When the build is limited to a single ABI there are no split APKs, the name of the
+            // single APK is then the name of that ABI instead of "universal".
+            def abiName = abi ?: (project.ext.buildAbis.size() == 1 ? project.ext.buildAbis[0] : "universal")
             if (variant.buildType.name == "debug") {
-                def abi = output.getFilter(com.android.build.OutputFile.ABI)
-                outputFileName = new File("termux-app_" + (apkVersionTag ? apkVersionTag : project.ext.packageVariant + "-" + "debug") + "_" + (abi ? abi : "universal") + ".apk")
+                outputFileName = new File("termux-app_" + (apkVersionTag ? apkVersionTag : project.ext.packageVariant + "-" + "debug") + "_" + abiName + ".apk")
             } else if (variant.buildType.name == "release") {
-                def abi = output.getFilter(com.android.build.OutputFile.ABI)
-                outputFileName = new File("termux-app_" + (apkVersionTag ? apkVersionTag : project.ext.packageVariant + "-" + "release") + "_" + (abi ? abi : "universal") + ".apk")
+                outputFileName = new File("termux-app_" + (apkVersionTag ? apkVersionTag : project.ext.packageVariant + "-" + "release") + "_" + abiName + ".apk")
             }
         }
     }
@@ -218,18 +233,30 @@ clean {
 task downloadBootstraps() {
     doLast {
         def packageVariant = project.ext.packageVariant
+        // Only the bootstrap of the ABIs that are built is needed.
+        def abis = project.ext.buildAbis ?: ['x86', 'x86_64', 'armeabi-v7a', 'arm64-v8a']
+        def archForAbi = ['arm64-v8a': 'aarch64', 'armeabi-v7a': 'arm', 'x86': 'i686', 'x86_64': 'x86_64']
+        def arches = abis.collect { archForAbi[it] }.findAll { it }.unique()
         if (packageVariant == "apt-android-7") {
             def version = "2026.02.12-r1" + "%2B" + "apt.android-7"
-            downloadBootstrap("aarch64", "ea2aeba8819e517db711f8c32369e89e7c52cee73e07930ff91185e1ab93f4f3", version)
-            downloadBootstrap("arm", "a38f4d3b2f735f83be2bf54eff463e86dc32a3e2f9f861c1557c4378d249c018", version)
-            downloadBootstrap("i686", "f5bc0b025b9f3b420b5fcaeefc064f888f5f22a0d6fd7090f4aac0c33eb3555b", version)
-            downloadBootstrap("x86_64", "b7fd0f2e3a4de534be3144f9f91acc768630fc463eaf134ab2e64c545e834f7a", version)
+            if (arches.contains('aarch64'))
+                downloadBootstrap("aarch64", "ea2aeba8819e517db711f8c32369e89e7c52cee73e07930ff91185e1ab93f4f3", version)
+            if (arches.contains('arm'))
+                downloadBootstrap("arm", "a38f4d3b2f735f83be2bf54eff463e86dc32a3e2f9f861c1557c4378d249c018", version)
+            if (arches.contains('i686'))
+                downloadBootstrap("i686", "f5bc0b025b9f3b420b5fcaeefc064f888f5f22a0d6fd7090f4aac0c33eb3555b", version)
+            if (arches.contains('x86_64'))
+                downloadBootstrap("x86_64", "b7fd0f2e3a4de534be3144f9f91acc768630fc463eaf134ab2e64c545e834f7a", version)
         } else if (packageVariant == "apt-android-5") {
             def version = "2022.04.28-r6" + "+" + packageVariant
-            downloadBootstrap("aarch64", "913609d439415c828c5640be1b0561467e539cb1c7080662decaaca2fb4820e7", version)
-            downloadBootstrap("arm", "26bfb45304c946170db69108e5eb6e3641aad751406ce106c80df80cad2eccf8", version)
-            downloadBootstrap("i686", "46dcfeb5eef67ba765498db9fe4c50dc4690805139aa0dd141a9d8ee0693cd27", version)
-            downloadBootstrap("x86_64", "615b590679ee6cd885b7fd2ff9473c845e920f9b422f790bb158c63fe42b8481", version)
+            if (arches.contains('aarch64'))
+                downloadBootstrap("aarch64", "913609d439415c828c5640be1b0561467e539cb1c7080662decaaca2fb4820e7", version)
+            if (arches.contains('arm'))
+                downloadBootstrap("arm", "26bfb45304c946170db69108e5eb6e3641aad751406ce106c80df80cad2eccf8", version)
+            if (arches.contains('i686'))
+                downloadBootstrap("i686", "46dcfeb5eef67ba765498db9fe4c50dc4690805139aa0dd141a9d8ee0693cd27", version)
+            if (arches.contains('x86_64'))
+                downloadBootstrap("x86_64", "615b590679ee6cd885b7fd2ff9473c845e920f9b422f790bb158c63fe42b8481", version)
         } else {
             throw new GradleException("Unsupported TERMUX_PACKAGE_VARIANT \"" + packageVariant + "\"")
         }
