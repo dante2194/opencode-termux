@@ -1051,7 +1051,7 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
     /** Called on the UI thread every time the state of the installation changes. */
     private final OpenCodeBootstrap.InstallListener mOpenCodeInstallListener = new OpenCodeBootstrap.InstallListener() {
         @Override
-        public void onInstallStateChanged(OpenCodeInstallState state) {
+        public void onOpenCodeInstallStateChanged(OpenCodeInstallState state) {
             if (mOpenCodeInstallDialog == null || state == null) return;
 
             if (state.done && !state.failed) {
