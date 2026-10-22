@@ -1,14 +1,13 @@
 package com.termux.app;
 
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.app.Notification;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
-import android.app.ProgressDialog;
 import android.content.Context;
-import android.content.Intent;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.system.Os;
 import android.text.TextUtils;
@@ -37,7 +36,9 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -59,6 +60,11 @@ import java.util.regex.Pattern;
  * survives the app being killed mid download and is able to repair itself afterwards. No root, no
  * proot and no chroot is needed.</p>
  *
+ * <p>The state of the installation is kept in {@link OpenCodeInstallState} and written to the
+ * disk after every change, so that the app shows the real progress again after it was closed.
+ * The installation itself is not bound to an activity, it keeps running in the background and the
+ * user is informed through a notification.</p>
+ *
  * @see <a href="https://github.com/manhduonghn/opencode-install-technique">opencode-install-technique</a>
  */
 public final class OpenCodeBootstrap {
@@ -74,6 +80,17 @@ public final class OpenCodeBootstrap {
 
     /** The command the user types inside Termux to start the OpenCode TUI. */
     public static final String OPENCODE_COMMAND = "opencode";
+
+    /**
+     * A listener that is notified every time the state of the installation changes. The callback
+     * is always invoked on the UI thread.
+     */
+    public interface InstallListener {
+        /**
+         * @param state the new state of the installation, never null
+         */
+        void onOpenCodeInstallStateChanged(OpenCodeInstallState state);
+    }
 
     /* ==========================================================================================
      * Paths
@@ -108,6 +125,8 @@ public final class OpenCodeBootstrap {
     public static final String TMP_DIR = OC_HOME + "/tmp";
     /** Directory holding the glibc loader shipped by {@code glibc-runner}. */
     public static final String GLIBC_LIB_DIR = PREFIX + "/glibc/lib";
+    /** Cache directory of apt, the downloaded packages are put there. */
+    public static final String APT_ARCHIVES_DIR = PREFIX + "/var/cache/apt/archives";
     /** Launcher script, {@code opencode}. */
     public static final String OPENCODE_BIN_PATH = PREFIX + "/bin/opencode";
     /** Launcher script, {@code oc-install}. */
@@ -178,6 +197,10 @@ public final class OpenCodeBootstrap {
 
     private static final Pattern VERSION_PATTERN = Pattern.compile("\"version\"\\s*:\\s*\"([^\"]+)\"");
     private static final Pattern VERSION_OUTPUT_PATTERN = Pattern.compile("(?s).*\\d+\\.\\d+.*");
+    /** The uri of a package, printed by {@code apt-get install --print-uris}. */
+    private static final Pattern APT_URI_PATTERN = Pattern.compile("^'([^']+)'\\s+(\\S+)\\s+(\\d+)\\s+(?:(\\w+):)?([0-9a-fA-F]+)");
+    /** The size of a package, printed by apt at the end of a line. */
+    private static final Pattern APT_SIZE_PATTERN = Pattern.compile("\\[([0-9][0-9.,]*)\\s*([kKmMgG]?B)?\\]");
 
     /** Notification channel used for the progress and the result of an installation. */
     public static final String NOTIFICATION_CHANNEL_ID = "opencode_notification_channel";
@@ -187,8 +210,16 @@ public final class OpenCodeBootstrap {
     public static final int NOTIFICATION_ID = 1338;
 
     private static final Object sLock = new Object();
-    private static boolean sInstallerRunning = false;
+    /** The installer that is currently running, null when nothing is being installed. */
+    private static Installer sInstaller = null;
+    /** The listeners that want to know about the progress of the installation. */
+    private static final List<InstallListener> sListeners = new CopyOnWriteArrayList<>();
+    /** The callbacks that are waiting for the installation to finish. */
     private static final List<Runnable> sInstallWaiters = new ArrayList<>();
+    /** The state of the installation, it is mirrored on the disk. */
+    private static OpenCodeInstallState sState = new OpenCodeInstallState();
+    /** The handler of the UI thread, used to notify the listeners. */
+    private static final Handler sMainHandler = new Handler(Looper.getMainLooper());
 
     private OpenCodeBootstrap() {}
 
@@ -201,7 +232,8 @@ public final class OpenCodeBootstrap {
      *
      * <p>If something is missing, the installer is started and {@code onReady} is called once the
      * installation finished (successfully or not). The callback is always invoked on the UI
-     * thread.</p>
+     * thread. When an installation is already running, the request is queued and the progress is
+     * shown by the listeners.</p>
      */
     public static void setupIfNeeded(final Activity activity, final Runnable onReady) {
         if (activity == null) return;
@@ -212,17 +244,21 @@ public final class OpenCodeBootstrap {
             return;
         }
 
+        final Context context = activity.getApplicationContext();
+
+        final Installer installer;
         synchronized (sLock) {
-            if (sInstallerRunning) {
+            if (sInstaller != null) {
                 Logger.logInfo(LOG_TAG, "An installation is already running, queueing the request.");
                 if (onReady != null) sInstallWaiters.add(onReady);
                 return;
             }
-            sInstallerRunning = true;
+            installer = new Installer(context, false);
+            sInstaller = installer;
             if (onReady != null) sInstallWaiters.add(onReady);
         }
 
-        new Installer(activity, false).start();
+        installer.start();
     }
 
     /**
@@ -237,15 +273,19 @@ public final class OpenCodeBootstrap {
             return;
         }
 
+        final Context context = activity.getApplicationContext();
+
+        final Installer installer;
         synchronized (sLock) {
-            if (sInstallerRunning) {
+            if (sInstaller != null) {
                 Logger.logInfo(LOG_TAG, "An installation is already running, ignoring the update request.");
                 return;
             }
-            sInstallerRunning = true;
+            installer = new Installer(context, true);
+            sInstaller = installer;
         }
 
-        new Installer(activity, true).start();
+        installer.start();
     }
 
     /**
@@ -262,7 +302,7 @@ public final class OpenCodeBootstrap {
             // auto updater, so make sure it is still patched.
             new Thread(() -> {
                 try {
-                    Installer installer = new Installer(activity, false);
+                    Installer installer = new Installer(activity.getApplicationContext(), false);
                     installer.logOnly = true;
                     installer.repairOnly();
                 } catch (Exception e) {
@@ -273,6 +313,57 @@ public final class OpenCodeBootstrap {
             Logger.logInfo(LOG_TAG, "The OpenCode runtime is incomplete: " + TextUtils.join(", ", problems));
             setupIfNeeded(activity, null);
         }
+    }
+
+    /**
+     * Read the state of the last installation from the disk. It has to be called once when the
+     * process of the app starts, so that the screen of the app shows the real progress even when
+     * Android killed the app while it was downloading something.
+     */
+    public static void restoreState() {
+        synchronized (sLock) {
+            // An installation that is still running has a state that is up to date.
+            if (sInstaller != null) return;
+
+            OpenCodeInstallState saved = OpenCodeInstallState.load();
+            if (saved == null) return;
+
+            if (saved.running) {
+                // The process was killed, the installation is not running anymore.
+                saved.running = false;
+                saved.message = saved.message == null ? "" : saved.message;
+                saved.detail = "The app was closed, the installation was interrupted.";
+                saved.addStep("The previous installation was interrupted, it is resumed automatically.");
+            }
+
+            sState = saved;
+        }
+    }
+
+    /** @return the current state of the installation, never null. */
+    public static OpenCodeInstallState getInstallState() {
+        synchronized (sLock) {
+            return copyOf(sState);
+        }
+    }
+
+    /** @return true while an installation is running. */
+    public static boolean isInstallRunning() {
+        synchronized (sLock) {
+            return sInstaller != null;
+        }
+    }
+
+    /** Register a listener that is notified about every change of the state. */
+    public static void addInstallListener(InstallListener listener) {
+        if (listener == null) return;
+        sListeners.add(listener);
+    }
+
+    /** Unregister a listener. */
+    public static void removeInstallListener(InstallListener listener) {
+        if (listener == null) return;
+        sListeners.remove(listener);
     }
 
     /**
@@ -327,23 +418,22 @@ public final class OpenCodeBootstrap {
 
     private static final class Installer {
 
-        private final Activity activity;
+        private final Context context;
         private final boolean forceUpdate;
         private final Map<String, String> env = new HashMap<>();
         private final List<String> steps = new ArrayList<>();
 
-        private ProgressDialog progressDialog;
         private String lastOutput = "";
         private boolean logOnly = false;
         /** apt options pointing at the temporary sources.list, null when the user config works. */
         private List<String> mTempSourcesOptions = null;
 
-        Installer(Activity activity, boolean forceUpdate) {
-            this.activity = activity;
+        Installer(Context context, boolean forceUpdate) {
+            this.context = context == null ? null : context.getApplicationContext();
             this.forceUpdate = forceUpdate;
 
             try {
-                env.putAll(new TermuxShellEnvironment().getEnvironment(activity, false));
+                env.putAll(new TermuxShellEnvironment().getEnvironment(this.context, false));
             } catch (Exception e) {
                 Logger.logStackTraceWithMessage(LOG_TAG, "Failed to build the shell environment", e);
                 env.put("HOME", HOME);
@@ -364,14 +454,6 @@ public final class OpenCodeBootstrap {
         }
 
         void start() {
-            runOnUiThread(activity, () -> {
-                try {
-                    progressDialog = ProgressDialog.show(activity, null,
-                        activity.getString(R.string.opencode_installing), true, false);
-                } catch (Exception e) {
-                    progressDialog = null;
-                }
-            });
             new Thread(this::run, "opencode-setup").start();
         }
 
@@ -381,13 +463,13 @@ public final class OpenCodeBootstrap {
             try {
                 writeDiagnostics();
                 if (forceUpdate) {
-                    status("Updating OpenCode...");
+                    setStage(OpenCodeInstallState.STAGE_PREPARE, "Updating OpenCode...");
                     doInstall();
                 } else if (!runtimeProblems().isEmpty()) {
-                    status("Preparing the OpenCode runtime...");
+                    setStage(OpenCodeInstallState.STAGE_PREPARE, "Preparing the OpenCode runtime...");
                     doInstall();
                 } else {
-                    status("Checking the OpenCode runtime...");
+                    setStage(OpenCodeInstallState.STAGE_PREPARE, "Checking the OpenCode runtime...");
                     doMaintenance();
                 }
                 success = true;
@@ -399,13 +481,12 @@ public final class OpenCodeBootstrap {
             }
 
             if (success) {
-                status("OpenCode is ready.");
+                setStageDone();
                 notifyFinished("OpenCode is ready", "Version " + getInstalledVersion() + " is installed.", false);
             } else {
                 handleFailure(errorMessage == null ? "Unknown error" : errorMessage);
             }
 
-            dismissProgressDialog();
             releaseWaiters();
         }
 
@@ -415,25 +496,28 @@ public final class OpenCodeBootstrap {
             ensureSecondStage();
             ensureResolvConf();
 
-            status("Installing the glibc runtime...");
+            setStage(OpenCodeInstallState.STAGE_APT_UPDATE, "Refreshing the package lists...");
             if (!aptUpdate(false))
                 throw new InstallException("Could not refresh the package lists from any mirror. Check the Wi-Fi/mobile connection and try again.");
 
+            setStage(OpenCodeInstallState.STAGE_APT_INSTALL, "Installing the glibc repository...");
             if (!aptInstall(Arrays.asList("glibc-repo")))
                 throw new InstallException("Could not install the 'glibc-repo' package. Check the Wi-Fi/mobile connection and try again.");
 
+            setStage(OpenCodeInstallState.STAGE_APT_UPDATE, "Refreshing the package lists of the glibc repository...");
             if (!aptUpdate(true))
                 throw new InstallException("Could not refresh the package lists of the glibc repository.");
 
             // 'termux-am' is needed by the 'oc-install' launcher, it asks the app to install
             // or update the runtime.
+            setStage(OpenCodeInstallState.STAGE_APT_INSTALL, "Installing the helper packages...");
             if (!aptInstall(Arrays.asList("glibc-runner", "patchelf", "tar", "termux-am")))
                 Logger.logWarn(LOG_TAG, "Some of the helper packages could not be installed, continuing anyway.");
 
             // 'patchelf' links against libc++_shared.so, an old libc++ makes it die with
             // "cannot locate symbol __hash_memory". Verify it before downloading ~100 MB.
             if (!patchelfWorks()) {
-                status("Repairing the patchelf tool...");
+                setStage(OpenCodeInstallState.STAGE_APT_INSTALL, "Repairing the patchelf tool...");
                 aptInstall(Arrays.asList("patchelf", "libc++"));
                 if (!patchelfWorks()) {
                     aptReinstall(Arrays.asList("patchelf", "libc++"));
@@ -451,10 +535,11 @@ public final class OpenCodeBootstrap {
                 throw new InstallException("The CPU architecture \"" + Build.SUPPORTED_ABIS[0] + "\" has no official OpenCode build.");
 
             String version = fetchLatestVersion();
-            status("Downloading OpenCode " + version + "...");
 
+            setStage(OpenCodeInstallState.STAGE_DOWNLOAD, "Downloading OpenCode " + version + "...");
             File tarball = downloadTarball(arch, version);
             try {
+                setStage(OpenCodeInstallState.STAGE_EXTRACT, "Extracting the OpenCode package...");
                 File binary = extractBinary(tarball);
                 File installed = installBinary(binary, version, loader);
                 if (installed == null) {
@@ -485,7 +570,7 @@ public final class OpenCodeBootstrap {
             deleteQuietly(new File(LEGACY_SETUP_SCRIPT_PATH));
             restoreLauncher(new File(OPENCODE_BIN_PATH), buildOpenCodeLauncher());
             restoreLauncher(new File(OC_INSTALL_PATH), buildOcInstallLauncher());
-            repairInterpreterIfNeeded(activity);
+            repairInterpreterIfNeeded(context);
         }
 
         /**
@@ -493,13 +578,13 @@ public final class OpenCodeBootstrap {
          * to the foreground and the runtime is otherwise complete.
          */
         void repairOnly() {
-            repairInterpreterIfNeeded(activity);
+            repairInterpreterIfNeeded(context);
         }
 
         /* ------------------------------------------------------------------ apt */
 
         private boolean aptUpdate(boolean withGlibc) {
-            if (apt(Arrays.asList("update"), APT_UPDATE_TIMEOUT_MS, true))
+            if (apt(Arrays.asList("update"), APT_UPDATE_TIMEOUT_MS, true, new AptUpdateListener()))
                 return true;
 
             // The configuration of the user may be broken, try the known mirrors with a
@@ -510,7 +595,7 @@ public final class OpenCodeBootstrap {
                     writeTempSources(main, glibc);
                     List<String> args = new ArrayList<>();
                     args.add("update");
-                    if (apt(args, APT_UPDATE_TIMEOUT_MS, true)) {
+                    if (apt(args, APT_UPDATE_TIMEOUT_MS, true, new AptUpdateListener())) {
                         // Use the working mirrors for the installs as well, the configuration
                         // of the user is most likely broken.
                         mTempSourcesOptions = tempSourcesOptions();
@@ -530,14 +615,21 @@ public final class OpenCodeBootstrap {
             args.add("-y");
             args.addAll(packages);
 
-            if (apt(args, APT_INSTALL_TIMEOUT_MS, true))
+            // Download the packages with a progress bar of our own, apt does not tell how much
+            // has been downloaded already. When that is not possible apt does the download and
+            // the progress is guessed from its output.
+            boolean downloaded = preDownloadPackages(packages);
+            if (downloaded)
+                setProgress(100, "");
+
+            if (apt(args, APT_INSTALL_TIMEOUT_MS, true, downloaded ? null : new AptInstallListener()))
                 return true;
 
             // The package database may be broken if the app was killed during an install.
             status("Repairing the package database...");
-            run(Arrays.asList(PREFIX + "/bin/dpkg", "--configure", "-a"), APT_INSTALL_TIMEOUT_MS, true);
-            apt(Arrays.asList("-f", "install", "-y"), APT_INSTALL_TIMEOUT_MS, true);
-            return apt(args, APT_INSTALL_TIMEOUT_MS, true);
+            run(Arrays.asList(PREFIX + "/bin/dpkg", "--configure", "-a"), APT_INSTALL_TIMEOUT_MS, true, null);
+            apt(Arrays.asList("-f", "install", "-y"), APT_INSTALL_TIMEOUT_MS, true, null);
+            return apt(args, APT_INSTALL_TIMEOUT_MS, true, null);
         }
 
         private boolean aptReinstall(List<String> packages) {
@@ -546,10 +638,10 @@ public final class OpenCodeBootstrap {
             args.add("--reinstall");
             args.add("-y");
             args.addAll(packages);
-            return apt(args, APT_INSTALL_TIMEOUT_MS, true);
+            return apt(args, APT_INSTALL_TIMEOUT_MS, true, null);
         }
 
-        private boolean apt(List<String> extraArgs, long timeoutMs, boolean stream) {
+        private boolean apt(List<String> extraArgs, long timeoutMs, boolean stream, LineListener listener) {
             List<String> cmd = new ArrayList<>();
             cmd.add(PREFIX + "/bin/apt-get");
             cmd.add("-o");
@@ -562,7 +654,7 @@ public final class OpenCodeBootstrap {
                 cmd.addAll(mTempSourcesOptions);
             cmd.addAll(extraArgs);
 
-            return run(cmd, timeoutMs, stream).exitCode == 0;
+            return run(cmd, timeoutMs, stream, listener).exitCode == 0;
         }
 
         /** @return the apt options that make apt use the temporary sources.list. */
@@ -585,6 +677,128 @@ public final class OpenCodeBootstrap {
             } catch (IOException e) {
                 Logger.logStackTraceWithMessage(LOG_TAG, "Failed to write the temporary sources.list", e);
             }
+        }
+
+        /**
+         * Download the packages of an apt transaction with a progress bar, so that the user knows
+         * how much has been downloaded already.
+         *
+         * <p>The files are put into the cache of apt, apt then installs them without downloading
+         * them a second time.</p>
+         *
+         * @return true when all packages were downloaded, false when apt has to do it itself
+         */
+        private boolean preDownloadPackages(List<String> packages) {
+            List<String> cmd = new ArrayList<>();
+            cmd.add(PREFIX + "/bin/apt-get");
+            cmd.add("-o");
+            cmd.add("Acquire::Retries=3");
+            cmd.add("-o");
+            cmd.add("Acquire::http::Timeout=30");
+            cmd.add("-o");
+            cmd.add("Acquire::https::Timeout=30");
+            if (mTempSourcesOptions != null)
+                cmd.addAll(mTempSourcesOptions);
+            cmd.add("install");
+            cmd.add("-y");
+            cmd.add("--print-uris");
+            cmd.addAll(packages);
+
+            CmdResult result = run(cmd, APT_UPDATE_TIMEOUT_MS, false, null);
+            if (result.exitCode != 0)
+                return false;
+
+            List<PackageUri> uris = parsePackageUris(result.output);
+            if (uris.isEmpty())
+                return false;
+
+            long total = 0;
+            for (PackageUri uri : uris) {
+                if (uri.size > 0)
+                    total += uri.size;
+            }
+            if (total <= 0)
+                return false;
+
+            File archivesDir = new File(APT_ARCHIVES_DIR);
+            File partialDir = new File(archivesDir, "partial");
+            if (!partialDir.isDirectory() && !partialDir.mkdirs())
+                return false;
+
+            long done = 0;
+            int index = 0;
+            for (final PackageUri uri : uris) {
+                index++;
+                File target = new File(archivesDir, uri.fileName);
+                if (target.isFile() && uri.matches(target)) {
+                    done += uri.size;
+                    continue;
+                }
+
+                File temp = new File(partialDir, uri.fileName);
+                final long base = done;
+                final long totalBytes = total;
+                final int number = index;
+                final int count = uris.size();
+
+                try {
+                    downloadFile(uri.url, temp, true, (bytesDone, bytesTotal, detail) -> {
+                        long overall = base + bytesDone;
+                        setBytes(overall, totalBytes, "Package " + number + "/" + count + ": " +
+                            uri.fileName + " - " + detail);
+                    });
+                } catch (IOException e) {
+                    Logger.logWarn(LOG_TAG, "Could not download " + uri.url + ": " + e.getMessage());
+                    deleteQuietly(temp);
+                    return false;
+                }
+
+                if (!uri.matches(temp)) {
+                    Logger.logWarn(LOG_TAG, "The checksum of " + uri.fileName + " does not match, letting apt download it.");
+                    deleteQuietly(temp);
+                    return false;
+                }
+
+                deleteQuietly(target);
+                if (!temp.renameTo(target)) {
+                    if (!copyFile(temp, target)) {
+                        deleteQuietly(temp);
+                        return false;
+                    }
+                    deleteQuietly(temp);
+                }
+
+                done += uri.size;
+                setBytes(done, total, "Package " + number + "/" + count + ": " + uri.fileName + " - done");
+            }
+
+            return true;
+        }
+
+        /** @return the packages that apt would download for the given transaction. */
+        private static List<PackageUri> parsePackageUris(String output) {
+            List<PackageUri> uris = new ArrayList<>();
+            if (output == null) return uris;
+
+            for (String line : output.split("\n")) {
+                line = line.trim();
+                if (!line.startsWith("'")) continue;
+
+                Matcher matcher = APT_URI_PATTERN.matcher(line);
+                if (!matcher.find()) continue;
+
+                PackageUri uri = new PackageUri();
+                uri.url = matcher.group(1);
+                uri.fileName = matcher.group(2);
+                uri.size = Long.parseLong(matcher.group(3));
+                uri.hashAlgorithm = matcher.group(4);
+                uri.hash = matcher.group(5);
+                if (uri.url == null || uri.fileName == null) continue;
+
+                uris.add(uri);
+            }
+
+            return uris;
         }
 
         /* ------------------------------------------------------------------ version & download */
@@ -629,12 +843,8 @@ public final class OpenCodeBootstrap {
             for (String url : urls) {
                 File target = new File(tmpDir, fileName);
                 try {
-                    status("Downloading OpenCode " + version + "...");
-                    download(url, target);
-                    if (expectedIntegrity != null && !verifySha512(target, expectedIntegrity)) {
-                        deleteQuietly(target);
-                        throw new IOException("The checksum of the downloaded file does not match the one of the npm registry.");
-                    }
+                    setStage(OpenCodeInstallState.STAGE_DOWNLOAD, "Downloading OpenCode " + version + "...");
+                    downloadTarballTo(url, target, expectedIntegrity);
                     return target;
                 } catch (IOException e) {
                     lastError = e;
@@ -644,6 +854,33 @@ public final class OpenCodeBootstrap {
             }
 
             throw new InstallException("Could not download the OpenCode package: " + (lastError == null ? "unknown error" : lastError.getMessage()));
+        }
+
+        /**
+         * Download the tarball of OpenCode. A file that was downloaded before is continued where
+         * it stopped, so that the progress is kept when the app is closed in the middle of the
+         * download.
+         */
+        private void downloadTarballTo(String url, File target, String expectedIntegrity) throws IOException {
+            // The file may have been downloaded completely before the app was closed.
+            if (expectedIntegrity != null && target.isFile() && verifySha512(target, expectedIntegrity))
+                return;
+
+            try {
+                downloadFile(url, target, true, this::reportDownloadProgress);
+            } catch (IOException e) {
+                // The partial file may be useless, download it again from the beginning.
+                Logger.logWarn(LOG_TAG, "Could not continue the download of " + url + ": " + e.getMessage());
+                deleteQuietly(target);
+                downloadFile(url, target, false, this::reportDownloadProgress);
+            }
+
+            if (expectedIntegrity != null && !verifySha512(target, expectedIntegrity)) {
+                deleteQuietly(target);
+                downloadFile(url, target, false, this::reportDownloadProgress);
+                if (!verifySha512(target, expectedIntegrity))
+                    throw new IOException("The checksum of the downloaded file does not match the one of the npm registry.");
+            }
         }
 
         /** @return the base64 encoded sha512 digest of the tarball as published by npm. */
@@ -676,18 +913,44 @@ public final class OpenCodeBootstrap {
             }
         }
 
-        private void download(String url, File target) throws IOException {
-            HttpURLConnection connection = openConnection(url);
+        /**
+         * Download a file and report the progress.
+         *
+         * @param url      the url of the file
+         * @param target   the file that is written
+         * @param resume   true when the download may be continued where it stopped
+         * @param listener called with the number of bytes and the total size
+         * @return the number of bytes that were downloaded in this run
+         */
+        private long downloadFile(String url, File target, boolean resume, DownloadListener listener) throws IOException {
+            long alreadyHave = 0;
+            if (resume && target.isFile())
+                alreadyHave = target.length();
+
+            HttpURLConnection connection = openConnection(url, alreadyHave);
             try {
                 connection.connect();
-                long total = connection.getContentLength();
-                long read = 0;
-                long lastReportAt = SystemClock.uptimeMillis();
-                int lastPercent = -1;
+                long contentLength = connection.getContentLength();
+                long total;
+                boolean append;
+
+                if (connection.getResponseCode() == HttpURLConnection.HTTP_PARTIAL) {
+                    append = true;
+                    total = alreadyHave + (contentLength > 0 ? contentLength : 0);
+                } else {
+                    // The server ignored the range request, the file is downloaded again.
+                    append = false;
+                    alreadyHave = 0;
+                    total = contentLength;
+                }
+
                 long startedAt = SystemClock.uptimeMillis();
+                long lastReportAt = startedAt;
+                int lastPercent = -1;
+                long read = alreadyHave;
 
                 try (InputStream in = connection.getInputStream();
-                     OutputStream out = new FileOutputStream(target)) {
+                     FileOutputStream out = new FileOutputStream(target, append)) {
                     byte[] buffer = new byte[64 * 1024];
                     int count;
                     while ((count = in.read(buffer)) != -1) {
@@ -695,23 +958,42 @@ public final class OpenCodeBootstrap {
                         read += count;
 
                         int percent = total > 0 ? (int) (read * 100 / total) : 0;
-                        boolean step = percent >= lastPercent + 2 || percent == 100;
                         long now = SystemClock.uptimeMillis();
+                        boolean step = percent >= lastPercent + 2 || percent == 100;
                         if (percent != lastPercent && (step || now - lastReportAt >= 3000)) {
                             lastPercent = percent;
                             lastReportAt = now;
                             long elapsedMs = Math.max(1, now - startedAt);
                             double rate = (read / 1024.0 / 1024.0) / (elapsedMs / 1000.0);
                             long eta = rate > 0.01 ? (long) ((total - read) / (rate * 1024 * 1024)) : 0;
-                            status("Downloading OpenCode: " + percent + "% (" + (read / 1024 / 1024) + "/" +
-                                Math.max(0, total / 1024 / 1024) + " MB, " + String.format(java.util.Locale.US, "%.2f", rate) +
-                                " MB/s, " + formatEta(eta) + " left)");
+                            if (listener != null)
+                                listener.onDownloadProgress(read, total, formatTransferDetail(read, total, rate, eta));
                         }
                     }
+                    out.flush();
                 }
+
+                return read - alreadyHave;
             } finally {
                 connection.disconnect();
             }
+        }
+
+        /** Report the progress of the download of the OpenCode package. */
+        private void reportDownloadProgress(long bytesDone, long bytesTotal, String detail) {
+            setBytes(bytesDone, bytesTotal, detail);
+        }
+
+        private static String formatTransferDetail(long done, long total, double rate, long etaSeconds) {
+            StringBuilder sb = new StringBuilder();
+            sb.append(OpenCodeInstallDialog.formatSize(done));
+            if (total > 0)
+                sb.append(" / ").append(OpenCodeInstallDialog.formatSize(total));
+            if (rate > 0.01)
+                sb.append(String.format(Locale.US, " - %.2f MB/s", rate));
+            if (etaSeconds > 0)
+                sb.append(" - ").append(formatEta(etaSeconds)).append(" left");
+            return sb.toString();
         }
 
         private static String formatEta(long seconds) {
@@ -723,6 +1005,10 @@ public final class OpenCodeBootstrap {
         }
 
         private HttpURLConnection openConnection(String url) throws IOException {
+            return openConnection(url, 0);
+        }
+
+        private HttpURLConnection openConnection(String url, long rangeStart) throws IOException {
             String current = url;
             HttpURLConnection connection = null;
             for (int hop = 0; hop < 6; hop++) {
@@ -732,6 +1018,8 @@ public final class OpenCodeBootstrap {
                 connection.setReadTimeout((int) HTTP_READ_TIMEOUT_MS);
                 connection.setRequestProperty("User-Agent", USER_AGENT);
                 connection.setRequestProperty("Accept", "*/*");
+                if (rangeStart > 0)
+                    connection.setRequestProperty("Range", "bytes=" + rangeStart + "-");
                 int code = connection.getResponseCode();
                 if (code == HttpURLConnection.HTTP_MOVED_PERM ||
                     code == HttpURLConnection.HTTP_MOVED_TEMP ||
@@ -783,7 +1071,7 @@ public final class OpenCodeBootstrap {
             deleteQuietly(packageDir);
 
             CmdResult result = run(Arrays.asList(PREFIX + "/bin/tar", "-xzf", tarball.getAbsolutePath(),
-                "-C", tmpDir.getAbsolutePath(), "package/bin/opencode"), EXTRACT_TIMEOUT_MS, false);
+                "-C", tmpDir.getAbsolutePath(), "package/bin/opencode"), EXTRACT_TIMEOUT_MS, false, null);
             if (result.exitCode != 0) {
                 deleteQuietly(packageDir);
                 throw new InstallException("Extracting the tarball failed (exit " + result.exitCode + "): " + tail(result.output, 400));
@@ -821,7 +1109,7 @@ public final class OpenCodeBootstrap {
                 deleteQuietly(binary);
             }
 
-            status("Patching the OpenCode binary...");
+            setStage(OpenCodeInstallState.STAGE_PATCH, "Patching the OpenCode binary...");
             CmdResult patch = patchInterpreter(staged, loader);
             if (patch.exitCode != 0) {
                 status("The patch failed, reinstalling patchelf and retrying...");
@@ -839,8 +1127,8 @@ public final class OpenCodeBootstrap {
                 Logger.logStackTraceWithMessage(LOG_TAG, "Could not make the OpenCode binary executable", e);
             }
 
-            status("Verifying the OpenCode binary...");
-            CmdResult verify = run(Arrays.asList(staged.getAbsolutePath(), "--version"), VERIFY_TIMEOUT_MS, false);
+            setStage(OpenCodeInstallState.STAGE_VERIFY, "Verifying the OpenCode binary...");
+            CmdResult verify = run(Arrays.asList(staged.getAbsolutePath(), "--version"), VERIFY_TIMEOUT_MS, false, null);
             if (!looksLikeAVersion(verify)) {
                 deleteQuietly(staged);
                 if (target.isFile()) {
@@ -871,11 +1159,11 @@ public final class OpenCodeBootstrap {
 
         private CmdResult patchInterpreter(File file, String loader) {
             return run(Arrays.asList(PREFIX + "/bin/patchelf", "--set-interpreter", loader, file.getAbsolutePath()),
-                PATCH_TIMEOUT_MS, false);
+                PATCH_TIMEOUT_MS, false, null);
         }
 
         private boolean patchelfWorks() {
-            return run(Arrays.asList(PREFIX + "/bin/patchelf", "--version"), VERIFY_TIMEOUT_MS, false).exitCode == 0;
+            return run(Arrays.asList(PREFIX + "/bin/patchelf", "--version"), VERIFY_TIMEOUT_MS, false, null).exitCode == 0;
         }
 
         private static boolean looksLikeAVersion(CmdResult result) {
@@ -1026,7 +1314,7 @@ public final class OpenCodeBootstrap {
                 Logger.logStackTraceWithMessage(LOG_TAG, "Could not make the OpenCode binary executable", e);
             }
 
-            CmdResult verify = run(Arrays.asList(tmp.getAbsolutePath(), "--version"), VERIFY_TIMEOUT_MS, false);
+            CmdResult verify = run(Arrays.asList(tmp.getAbsolutePath(), "--version"), VERIFY_TIMEOUT_MS, false, null);
             if (!looksLikeAVersion(verify)) {
                 deleteQuietly(tmp);
                 Logger.logWarn(LOG_TAG, "The repaired OpenCode binary does not run, keeping the old one.");
@@ -1052,7 +1340,7 @@ public final class OpenCodeBootstrap {
             if (!script.isFile()) return;
 
             status("Finishing the Termux bootstrap...");
-            CmdResult result = run(Arrays.asList(PREFIX + "/bin/bash", script.getAbsolutePath()), SECOND_STAGE_TIMEOUT_MS, true);
+            CmdResult result = run(Arrays.asList(PREFIX + "/bin/bash", script.getAbsolutePath()), SECOND_STAGE_TIMEOUT_MS, true, null);
             if (result.exitCode != 0)
                 Logger.logWarn(LOG_TAG, "The second stage of the Termux bootstrap failed (exit " + result.exitCode + ")");
         }
@@ -1098,6 +1386,10 @@ public final class OpenCodeBootstrap {
         /* ------------------------------------------------------------------ process handling */
 
         private CmdResult run(List<String> cmd, long timeoutMs, boolean stream) {
+            return run(cmd, timeoutMs, stream, null);
+        }
+
+        private CmdResult run(List<String> cmd, long timeoutMs, boolean stream, LineListener listener) {
             StringBuilder output = new StringBuilder();
             try {
                 ProcessBuilder builder = new ProcessBuilder(cmd);
@@ -1118,6 +1410,13 @@ public final class OpenCodeBootstrap {
                             synchronized (sink) {
                                 if (sink.length() < MAX_OUTPUT_CHARS)
                                     sink.append(line).append('\n');
+                            }
+                            if (listener != null) {
+                                try {
+                                    listener.onLine(line);
+                                } catch (Exception e) {
+                                    // The listener must never break the installation.
+                                }
                             }
                             if (stream)
                                 Logger.logInfo(LOG_TAG, line);
@@ -1177,16 +1476,97 @@ public final class OpenCodeBootstrap {
 
             if (logOnly) return;
 
-            runOnUiThread(activity, () -> {
-                try {
-                    if (progressDialog != null && progressDialog.isShowing())
-                        progressDialog.setMessage(message);
-                } catch (Exception e) {
-                    // The activity is gone, ignore.
-                }
-            });
+            synchronized (sLock) {
+                sState.message = message;
+                sState.updatedAt = System.currentTimeMillis();
+                sState.addStep(message);
+            }
 
-            showProgressNotification(message);
+            publish();
+        }
+
+        /** Set the stage of the installation and the message that describes it. */
+        private void setStage(String stage, String message) {
+            if (logOnly) return;
+
+            Logger.logInfo(LOG_TAG, message);
+            appendLog("== " + message);
+
+            steps.add(message);
+            while (steps.size() > MAX_STEPS)
+                steps.remove(0);
+
+            synchronized (sLock) {
+                sState.stage = stage;
+                sState.stagePercent = 0;
+                sState.overallPercent = 0;
+                sState.message = message;
+                sState.detail = "";
+                sState.error = "";
+                sState.bytesDone = 0;
+                sState.bytesTotal = 0;
+                sState.running = true;
+                sState.done = false;
+                sState.failed = false;
+                sState.updatedAt = System.currentTimeMillis();
+                sState.recomputeOverallPercent();
+                sState.addStep(message);
+            }
+
+            publish();
+        }
+
+        /** Set the percentage of the current stage. */
+        private void setProgress(int stagePercent, String detail) {
+            if (logOnly) return;
+
+            synchronized (sLock) {
+                sState.stagePercent = Math.max(0, Math.min(100, stagePercent));
+                if (detail != null)
+                    sState.detail = detail;
+                sState.updatedAt = System.currentTimeMillis();
+                sState.recomputeOverallPercent();
+            }
+
+            publish();
+        }
+
+        /** Set the number of bytes that were downloaded and the total size. */
+        private void setBytes(long bytesDone, long bytesTotal, String detail) {
+            if (logOnly) return;
+
+            synchronized (sLock) {
+                sState.bytesDone = bytesDone;
+                sState.bytesTotal = bytesTotal;
+                if (bytesTotal > 0)
+                    sState.stagePercent = (int) Math.max(0, Math.min(100, bytesDone * 100 / bytesTotal));
+                if (detail != null)
+                    sState.detail = detail;
+                sState.updatedAt = System.currentTimeMillis();
+                sState.recomputeOverallPercent();
+            }
+
+            publish();
+        }
+
+        /** The installation finished successfully. */
+        private void setStageDone() {
+            if (logOnly) return;
+
+            synchronized (sLock) {
+                sState.stage = OpenCodeInstallState.STAGE_DONE;
+                sState.stagePercent = 100;
+                sState.overallPercent = 100;
+                sState.message = "OpenCode is ready.";
+                sState.detail = "Version " + getInstalledVersion() + " is installed.";
+                sState.running = false;
+                sState.done = true;
+                sState.failed = false;
+                sState.updatedAt = System.currentTimeMillis();
+                sState.addStep(sState.message);
+            }
+
+            publish();
         }
 
         private void appendLog(String line) {
@@ -1204,35 +1584,46 @@ public final class OpenCodeBootstrap {
 
         private void showProgressNotification(String message) {
             if (logOnly) return;
-            NotificationManager manager = NotificationUtils.getNotificationManager(activity);
+            NotificationManager manager = NotificationUtils.getNotificationManager(context);
             if (manager == null) return;
 
-            NotificationUtils.setupNotificationChannel(activity, NOTIFICATION_CHANNEL_ID, NOTIFICATION_CHANNEL_NAME,
+            NotificationUtils.setupNotificationChannel(context, NOTIFICATION_CHANNEL_ID, NOTIFICATION_CHANNEL_NAME,
                 NotificationManager.IMPORTANCE_LOW);
 
-            PendingIntent contentIntent = PendingIntent.getActivity(activity, 0,
-                TermuxActivity.newInstance(activity), PendingIntent.FLAG_UPDATE_CURRENT);
+            PendingIntent contentIntent = PendingIntent.getActivity(context, 0,
+                TermuxActivity.newInstance(context), PendingIntent.FLAG_UPDATE_CURRENT);
 
-            Notification.Builder builder = NotificationUtils.geNotificationBuilder(activity, NOTIFICATION_CHANNEL_ID,
+            Notification.Builder builder = NotificationUtils.geNotificationBuilder(context, NOTIFICATION_CHANNEL_ID,
                 Notification.PRIORITY_LOW, "OpenCode", message, null, contentIntent, null,
                 NotificationUtils.NOTIFICATION_MODE_SILENT);
             if (builder == null) return;
             builder.setSmallIcon(R.drawable.ic_service_notification);
             builder.setOngoing(true);
+
+            int percent;
+            String detail;
+            synchronized (sLock) {
+                percent = sState.getOverallPercent();
+                detail = sState.detail;
+            }
+            builder.setProgress(100, percent, false);
+            if (detail != null && !detail.isEmpty())
+                builder.setSubText(detail);
+
             manager.notify(NOTIFICATION_ID, builder.build());
         }
 
         private void notifyFinished(String title, String text, boolean isError) {
-            NotificationManager manager = NotificationUtils.getNotificationManager(activity);
+            NotificationManager manager = NotificationUtils.getNotificationManager(context);
             if (manager == null) return;
 
-            NotificationUtils.setupNotificationChannel(activity, NOTIFICATION_CHANNEL_ID, NOTIFICATION_CHANNEL_NAME,
+            NotificationUtils.setupNotificationChannel(context, NOTIFICATION_CHANNEL_ID, NOTIFICATION_CHANNEL_NAME,
                 NotificationManager.IMPORTANCE_LOW);
 
-            PendingIntent contentIntent = PendingIntent.getActivity(activity, 0,
-                TermuxActivity.newInstance(activity), PendingIntent.FLAG_UPDATE_CURRENT);
+            PendingIntent contentIntent = PendingIntent.getActivity(context, 0,
+                TermuxActivity.newInstance(context), PendingIntent.FLAG_UPDATE_CURRENT);
 
-            Notification.Builder builder = NotificationUtils.geNotificationBuilder(activity, NOTIFICATION_CHANNEL_ID,
+            Notification.Builder builder = NotificationUtils.geNotificationBuilder(context, NOTIFICATION_CHANNEL_ID,
                 Notification.PRIORITY_LOW, title, text, null, contentIntent, null,
                 NotificationUtils.NOTIFICATION_MODE_SILENT);
             if (builder == null) return;
@@ -1241,22 +1632,16 @@ public final class OpenCodeBootstrap {
             manager.notify(NOTIFICATION_ID, builder.build());
         }
 
-        private void cancelProgressNotification() {
-            NotificationManager manager = NotificationUtils.getNotificationManager(activity);
-            if (manager != null)
-                manager.cancel(NOTIFICATION_ID);
-        }
+        /** Save the state, show it in the notification and tell the listeners about it. */
+        private void publish() {
+            publishState();
 
-        private void dismissProgressDialog() {
-            runOnUiThread(activity, () -> {
-                if (progressDialog == null) return;
-                try {
-                    progressDialog.dismiss();
-                } catch (Exception e) {
-                    // The activity is gone, ignore.
-                }
-                progressDialog = null;
-            });
+            String message;
+            synchronized (sLock) {
+                message = sState.message;
+            }
+            if (message != null)
+                showProgressNotification(message);
         }
 
         private void handleFailure(String message) {
@@ -1278,18 +1663,19 @@ public final class OpenCodeBootstrap {
 
             notifyFinished("OpenCode: installation failed", tail(message, MAX_DETAIL_CHARS), true);
 
-            final String errorText = message;
-            runOnUiThread(activity, () -> {
-                try {
-                    new AlertDialog.Builder(activity)
-                        .setTitle(R.string.opencode_install_failed_title)
-                        .setMessage(errorText + "\n\n" + activity.getString(R.string.opencode_log_location, SETUP_LOG_PATH))
-                        .setPositiveButton(android.R.string.ok, null)
-                        .show();
-                } catch (Exception e) {
-                    // The activity is gone, ignore.
-                }
-            });
+            if (logOnly) return;
+
+            synchronized (sLock) {
+                sState.stage = OpenCodeInstallState.STAGE_FAILED;
+                sState.error = message == null ? "Unknown error" : message;
+                sState.running = false;
+                sState.done = false;
+                sState.failed = true;
+                sState.updatedAt = System.currentTimeMillis();
+                sState.addStep("FAILED: " + sState.error);
+            }
+
+            publish();
         }
 
         /* ------------------------------------------------------------------ lifecycle */
@@ -1299,11 +1685,137 @@ public final class OpenCodeBootstrap {
             synchronized (sLock) {
                 waiters = new ArrayList<>(sInstallWaiters);
                 sInstallWaiters.clear();
-                sInstallerRunning = false;
+                sInstaller = null;
             }
             for (Runnable waiter : waiters)
-                runOnUiThread(activity, waiter);
+                runOnUiThread(context, waiter);
         }
+    }
+
+    /* ==========================================================================================
+     * Listeners of the output of a process
+     * ========================================================================================== */
+
+    /** Called for every line of the output of a process. */
+    private interface LineListener {
+        void onLine(String line);
+    }
+
+    /** Called while a file is downloaded. */
+    private interface DownloadListener {
+        void onDownloadProgress(long bytesDone, long bytesTotal, String detail);
+    }
+
+    /**
+     * Guesses the progress of {@code apt-get update} from its output. Apt does not tell how much
+     * has been downloaded already, but it prints the size of every file it fetches.
+     */
+    private static final class AptUpdateListener implements LineListener {
+
+        private long knownTotal = 0;
+        private long doneBytes = 0;
+        private long currentSize = 0;
+
+        @Override
+        public void onLine(String line) {
+            if (line == null) return;
+
+            if (line.startsWith("Get:")) {
+                // The file that was fetched before is complete now.
+                if (currentSize > 0)
+                    doneBytes += currentSize;
+                currentSize = Math.max(0, parseAptSize(line));
+                if (currentSize > 0)
+                    knownTotal += currentSize;
+                report(line);
+                return;
+            }
+
+            if (line.startsWith("Fetched ") || line.startsWith("Ign:") || line.startsWith("Hit:")) {
+                report(line);
+            }
+        }
+
+        private void report(String line) {
+            long total = Math.max(knownTotal, doneBytes + currentSize);
+            int percent = total > 0 ? (int) Math.min(100, doneBytes * 100 / total) : 0;
+            setStageProgress(percent, doneBytes, total, line.trim());
+        }
+    }
+
+    /**
+     * Guesses the progress of {@code apt-get install} from its output, used when the packages
+     * could not be downloaded by the app itself.
+     */
+    private static final class AptInstallListener implements LineListener {
+
+        private long knownTotal = 0;
+        private long doneBytes = 0;
+        private long currentSize = 0;
+
+        @Override
+        public void onLine(String line) {
+            if (line == null) return;
+
+            if (line.startsWith("Get:")) {
+                if (currentSize > 0)
+                    doneBytes += currentSize;
+                currentSize = Math.max(0, parseAptSize(line));
+                if (currentSize > 0)
+                    knownTotal += currentSize;
+            } else if (line.startsWith("Fetched ")) {
+                if (currentSize > 0)
+                    doneBytes += currentSize;
+                currentSize = 0;
+            }
+
+            if (line.startsWith("Get:") || line.startsWith("Fetched ") || line.startsWith("Unpacking ") ||
+                line.startsWith("Setting up ")) {
+                long total = Math.max(knownTotal, doneBytes + currentSize);
+                int percent = total > 0 ? (int) Math.min(100, doneBytes * 100 / total) : 0;
+                setStageProgress(percent, doneBytes, total, line.trim());
+            }
+        }
+    }
+
+    /** @return the size of a package in bytes, -1 when it cannot be parsed. */
+    private static long parseAptSize(String line) {
+        if (line == null) return -1;
+        Matcher matcher = APT_SIZE_PATTERN.matcher(line);
+        if (!matcher.find()) return -1;
+
+        try {
+            String number = matcher.group(1).replace(',', '.');
+            double value = Double.parseDouble(number);
+            String unit = matcher.group(2) == null ? "b" : matcher.group(2).toLowerCase(Locale.US);
+            switch (unit) {
+                case "kb":
+                    return (long) (value * 1024);
+                case "mb":
+                    return (long) (value * 1024 * 1024);
+                case "gb":
+                    return (long) (value * 1024 * 1024 * 1024);
+                default:
+                    return (long) value;
+            }
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
+    /** Report the progress of the current stage, used by the listeners of apt. */
+    private static void setStageProgress(int percent, long bytesDone, long bytesTotal, String detail) {
+        synchronized (sLock) {
+            if (!sState.running) return;
+            sState.stagePercent = Math.max(0, Math.min(100, percent));
+            sState.bytesDone = bytesDone;
+            sState.bytesTotal = bytesTotal;
+            sState.detail = detail;
+            sState.updatedAt = System.currentTimeMillis();
+            sState.recomputeOverallPercent();
+            sState.addStep(detail);
+        }
+        publishState();
     }
 
     /* ==========================================================================================
@@ -1320,6 +1832,47 @@ public final class OpenCodeBootstrap {
             this.exitCode = exitCode;
             this.output = output == null ? "" : output;
             this.error = error;
+        }
+    }
+
+    /** A package that apt would download. */
+    private static final class PackageUri {
+        String url;
+        String fileName;
+        long size;
+        String hashAlgorithm;
+        String hash;
+
+        /** @return true when the file on disk has the checksum that apt expects. */
+        boolean matches(File file) {
+            if (hash == null || hash.isEmpty()) return file.isFile() && file.length() == size;
+            if (!file.isFile()) return false;
+
+            try {
+                MessageDigest digest;
+                String algorithm = hashAlgorithm == null ? "MD5" : hashAlgorithm;
+                if ("sha256".equalsIgnoreCase(algorithm))
+                    digest = MessageDigest.getInstance("SHA-256");
+                else if ("sha512".equalsIgnoreCase(algorithm))
+                    digest = MessageDigest.getInstance("SHA-512");
+                else
+                    digest = MessageDigest.getInstance("MD5");
+
+                byte[] buffer = new byte[64 * 1024];
+                try (InputStream in = new FileInputStream(file)) {
+                    int read;
+                    while ((read = in.read(buffer)) != -1)
+                        digest.update(buffer, 0, read);
+                }
+
+                StringBuilder sb = new StringBuilder();
+                for (byte b : digest.digest())
+                    sb.append(String.format(Locale.US, "%02x", b));
+                return sb.toString().equalsIgnoreCase(hash);
+            } catch (Exception e) {
+                Logger.logStackTraceWithMessage(LOG_TAG, "Could not check the checksum of " + file, e);
+                return false;
+            }
         }
     }
 
@@ -1384,13 +1937,55 @@ public final class OpenCodeBootstrap {
         return file.exists() && file.canExecute();
     }
 
-    private static void runOnUiThread(Activity activity, final Runnable runnable) {
+    private static void runOnUiThread(Context context, final Runnable runnable) {
         if (runnable == null) return;
-        if (activity == null) {
+        if (context == null) {
             runnable.run();
             return;
         }
-        activity.runOnUiThread(runnable);
+        sMainHandler.post(runnable);
+    }
+
+    /** Save the state on the disk and notify the listeners about it. */
+    private static void publishState() {
+        final OpenCodeInstallState snapshot;
+        synchronized (sLock) {
+            sState.updatedAt = System.currentTimeMillis();
+            snapshot = copyOf(sState);
+        }
+
+        OpenCodeInstallState.save(snapshot);
+
+        for (InstallListener listener : sListeners) {
+            final InstallListener current = listener;
+            sMainHandler.post(() -> {
+                try {
+                    current.onOpenCodeInstallStateChanged(snapshot);
+                } catch (Exception e) {
+                    Logger.logStackTraceWithMessage(LOG_TAG, "An install listener failed", e);
+                }
+            });
+        }
+    }
+
+    /** @return a copy of the given state, the copy is safe to hand out. */
+    private static OpenCodeInstallState copyOf(OpenCodeInstallState state) {
+        OpenCodeInstallState copy = new OpenCodeInstallState();
+        copy.stage = state.stage;
+        copy.stagePercent = state.stagePercent;
+        copy.overallPercent = state.overallPercent;
+        copy.message = state.message;
+        copy.detail = state.detail;
+        copy.error = state.error;
+        copy.bytesDone = state.bytesDone;
+        copy.bytesTotal = state.bytesTotal;
+        copy.running = state.running;
+        copy.done = state.done;
+        copy.failed = state.failed;
+        copy.updatedAt = state.updatedAt;
+        for (String step : state.getSteps())
+            copy.steps.add(step);
+        return copy;
     }
 
     private static void writeTextFile(File file, String content) throws IOException {

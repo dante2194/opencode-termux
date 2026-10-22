@@ -145,6 +145,12 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
     private FloatingPromptInput mOpenCodePromptInput;
 
     /**
+     * The dialog that shows the progress of the OpenCode installation. It is attached to the
+     * activity, the installation itself keeps running when the activity is gone.
+     */
+    private OpenCodeInstallDialog mOpenCodeInstallDialog;
+
+    /**
      * The {@link TermuxActivity} broadcast receiver for various things like terminal style configuration changes.
      */
     private final BroadcastReceiver mTermuxActivityBroadcastReceiver = new TermuxActivityBroadcastReceiver();
@@ -310,6 +316,10 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
             addTermuxActivityRootViewGlobalLayoutListener();
 
         registerTermuxActivityBroadcastReceiver();
+
+        // Show the progress of the OpenCode installation, the installation keeps running when
+        // the app is closed, the state of it is restored from the disk.
+        attachOpenCodeInstallDialog();
     }
 
     @Override
@@ -353,6 +363,11 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         super.onStop();
 
         Logger.logDebug(LOG_TAG, "onStop");
+
+        // The dialog belongs to the window of the activity, it has to go away with it. The
+        // installation keeps running, the progress is shown in the notification and the state
+        // is restored when the app is opened again.
+        detachOpenCodeInstallDialog();
 
         if (mIsInvalidState) return;
 
@@ -996,6 +1011,66 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
     public FloatingPromptInput getOpenCodePromptInput() {
         return mOpenCodePromptInput;
     }
+
+    /* ==========================================================================================
+     * The progress of the OpenCode installation
+     * ========================================================================================== */
+
+    /**
+     * Show the dialog with the progress of the OpenCode installation. The dialog is only shown
+     * when something is being installed or when the installation failed, otherwise the terminal
+     * is the only thing the user has to see.
+     */
+    private void attachOpenCodeInstallDialog() {
+        if (mOpenCodeInstallDialog == null)
+            mOpenCodeInstallDialog = new OpenCodeInstallDialog();
+
+        OpenCodeBootstrap.addInstallListener(mOpenCodeInstallListener);
+
+        OpenCodeInstallState state = OpenCodeBootstrap.getInstallState();
+        if (state == null) return;
+
+        if (state.running || state.failed) {
+            mOpenCodeInstallDialog.attach(this, this::retryOpenCodeInstall);
+            mOpenCodeInstallDialog.update(state);
+        }
+    }
+
+    /** Hide the dialog, the installation keeps running in the background. */
+    private void detachOpenCodeInstallDialog() {
+        OpenCodeBootstrap.removeInstallListener(mOpenCodeInstallListener);
+        if (mOpenCodeInstallDialog != null)
+            mOpenCodeInstallDialog.detach();
+    }
+
+    /** Install (or update) the OpenCode runtime again. */
+    private void retryOpenCodeInstall() {
+        OpenCodeBootstrap.requestUpdate(this);
+    }
+
+    /** Called on the UI thread every time the state of the installation changes. */
+    private final OpenCodeBootstrap.InstallListener mOpenCodeInstallListener = new OpenCodeBootstrap.InstallListener() {
+        @Override
+        public void onInstallStateChanged(OpenCodeInstallState state) {
+            if (mOpenCodeInstallDialog == null || state == null) return;
+
+            if (state.done && !state.failed) {
+                // Everything is installed, the terminal takes over.
+                mOpenCodeInstallDialog.detach();
+                return;
+            }
+
+            if (state.running || state.failed) {
+                // The user asked to run the installation in the background, do not bother him with
+                // the dialog again. A failure is always shown though.
+                if (mOpenCodeInstallDialog.isHiddenByUser() && !state.failed) return;
+
+                if (!mOpenCodeInstallDialog.isShowing())
+                    mOpenCodeInstallDialog.attach(TermuxActivity.this, TermuxActivity.this::retryOpenCodeInstall);
+                mOpenCodeInstallDialog.update(state);
+            }
+        }
+    };
 
     /** Acquire the wake lock of the service so that the device does not sleep while the agent works. */
     private void acquireWakeLock() {

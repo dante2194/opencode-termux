@@ -239,7 +239,11 @@
 
     <!-- OpenCode -->
     <string name="opencode_installing">Installing OpenCode…</string>
+    <string name="opencode_install_done_title">OpenCode is ready</string>
     <string name="opencode_install_failed_title">OpenCode installation failed</string>
+    <string name="opencode_install_hide">Run in the background</string>
+    <string name="opencode_install_close">Close</string>
+    <string name="opencode_install_retry">Retry</string>
     <string name="opencode_log_location">The details are in %1$s</string>
     <string name="opencode_not_installed">OpenCode is not installed yet. It is being installed now…</string>
     <string name="opencode_started">Starting OpenCode…</string>

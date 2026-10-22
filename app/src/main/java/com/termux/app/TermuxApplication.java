@@ -71,6 +71,10 @@ public class TermuxApplication extends Application {
         if (isTermuxFilesDirectoryAccessible) {
             TermuxShellEnvironment.writeEnvironmentToFile(this);
         }
+
+        // Read the state of the last OpenCode installation from the disk, so that the app shows
+        // the real progress again after it was closed or killed by Android.
+        OpenCodeBootstrap.restoreState();
     }
 
     public static void setLogConfig(Context context) {
