@@ -65,6 +65,12 @@ final class TermuxInstaller {
 
     /** The default Termux progress dialog, shown until the whole setup is finished. */
     private static volatile ProgressDialog sProgressDialog;
+    /** The activity that owns {@link #sProgressDialog}. */
+    private static volatile Activity sProgressActivity;
+    /** True from the start of the first setup until the terminal is ready. */
+    private static volatile boolean sStartupFlowActive = false;
+    /** The last message shown in the startup progress dialog. */
+    private static volatile String sProgressMessage;
 
     /** Performs bootstrap setup if necessary. */
     static void setupBootstrapIfNeeded(final Activity activity, final Runnable whenDone) {
@@ -268,32 +274,78 @@ final class TermuxInstaller {
      * The dialog is not cancelled when the bootstrap packages alone have been extracted: it is
      * kept visible while glibc and OpenCode are installed and is dismissed by
      * {@link #dismissStartupProgress()} when the whole setup is finished.
+     *
+     * <p>It is safe to call this again when the activity was recreated (for example after the
+     * user left the app and came back): the dialog of the old activity is replaced by a new one
+     * that belongs to the current activity.</p>
      */
     static void showStartupProgress(final Activity activity, final String message) {
         if (activity == null) return;
 
-        final ProgressDialog current = sProgressDialog;
+        sStartupFlowActive = true;
+        if (message != null)
+            sProgressMessage = message;
+
+        ProgressDialog current = sProgressDialog;
+        if (current != null && sProgressActivity != activity) {
+            // The activity that owned the dialog is gone, replace the stale dialog.
+            sProgressDialog = null;
+            try {
+                current.dismiss();
+            } catch (RuntimeException e) {
+                // Activity already dismissed - ignore.
+            }
+            current = null;
+        }
+
         if (current != null && current.isShowing()) {
-            if (message != null)
-                current.setMessage(message);
+            if (sProgressMessage != null)
+                current.setMessage(sProgressMessage);
             return;
         }
 
-        sProgressDialog = ProgressDialog.show(activity, null,
-            message == null ? activity.getString(R.string.bootstrap_installer_body) : message, true, false);
+        final String shownMessage = sProgressMessage != null
+            ? sProgressMessage : activity.getString(R.string.bootstrap_installer_body);
+        sProgressActivity = activity;
+        sProgressDialog = ProgressDialog.show(activity, null, shownMessage, true, false);
     }
 
-    /** @return true while the default startup progress dialog is visible. */
-    static boolean isStartupProgressShowing() {
+    /** @return true while a startup setup is running (even if the dialog is temporarily hidden). */
+    static boolean isStartupFlowActive() {
+        return sStartupFlowActive;
+    }
+
+    /** @return true while the default startup progress dialog of the given activity is visible. */
+    static boolean isStartupProgressShowing(final Activity activity) {
         final ProgressDialog dialog = sProgressDialog;
-        return dialog != null && dialog.isShowing();
+        return dialog != null && dialog.isShowing() && sProgressActivity == activity;
     }
 
     /** Update the message of the default startup progress dialog. */
-    static void setStartupProgressMessage(final String message) {
+    static void setStartupProgressMessage(final Activity activity, final String message) {
+        if (message != null)
+            sProgressMessage = message;
         final ProgressDialog dialog = sProgressDialog;
-        if (dialog == null || message == null) return;
+        if (dialog == null || sProgressActivity != activity || message == null) return;
         dialog.setMessage(message);
+    }
+
+    /**
+     * Hide the dialog when its activity goes away. The setup keeps running and the dialog is
+     * shown again by the next activity, so leaving the app and coming back right in the middle
+     * of the installation does not lose the progress screen.
+     */
+    static void hideStartupProgress(final Activity activity) {
+        if (activity == null || sProgressActivity != activity) return;
+        final ProgressDialog dialog = sProgressDialog;
+        sProgressDialog = null;
+        sProgressActivity = null;
+        if (dialog == null) return;
+        try {
+            dialog.dismiss();
+        } catch (RuntimeException e) {
+            // Activity already dismissed - ignore.
+        }
     }
 
     /**
@@ -301,6 +353,9 @@ final class TermuxInstaller {
      * finished (or failed), not when the bootstrap packages alone have been extracted.
      */
     static void dismissStartupProgress() {
+        sStartupFlowActive = false;
+        sProgressMessage = null;
+        sProgressActivity = null;
         final ProgressDialog dialog = sProgressDialog;
         sProgressDialog = null;
         if (dialog == null) return;
