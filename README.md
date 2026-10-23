@@ -16,7 +16,8 @@ one addition: a bootstrapper that
 2. downloads the **official** OpenCode CLI from npm,
 3. patches the ELF so that it runs on Android (`PT_INTERP` → Termux' glibc loader),
 4. verifies the binary and installs it atomically,
-5. starts the OpenCode TUI inside a Termux session.
+5. starts the OpenCode background service and opens the in-app **web UI**,
+6. opens the terminal/OpenTUI from the web toolbar with the `opencode` command when needed.
 
 ---
 
@@ -70,6 +71,9 @@ The full technical description, including the error matrix and the security trad
 
 ## Features
 
+- **Web UI as the main screen** — the app opens the OpenCode web UI directly in an in-app WebView.
+- **Terminal/OpenTUI as a secondary screen** — tap **Terminal** in the web toolbar to open a Termux
+  session and run `opencode`; tap **Open Web UI** in the terminal menu to return to the web app.
 - **Native OpenCode** — the official CLI, running as a normal process inside Termux.
 - **Full Termux toolbox for the agent** — the agent runs in a normal Termux shell, so
   `apt install <anything>`, `python`, `node`, `git`, `clang`, … are available out of the box.
@@ -102,7 +106,8 @@ On the first start the app:
 2. installs `glibc-runner`, `patchelf` and `tar` with `apt`,
 3. downloads the OpenCode CLI (~100 MB),
 4. patches, verifies and installs it,
-5. opens a Termux session and starts the OpenCode TUI in it.
+5. starts the OpenCode service and opens the web UI. The terminal/OpenTUI is available from the
+   **Terminal** button in the toolbar.
 
 The installation needs roughly **1 GB of free space** (tarball + extracted binary + staging copy).
 
@@ -110,10 +115,12 @@ The installation needs roughly **1 GB of free space** (tarball + extracted binar
 
 ## Usage
 
-Start the app: a Termux session is created and `opencode` is typed into it. From that moment the
-agent runs with the whole Termux environment at its disposal.
+Start the app: the OpenCode web UI opens. It talks to the same background service as the terminal.
+Tap **Terminal** in the top bar to open a full Termux session; the session starts the OpenCode TUI
+with the `opencode` command. The TUI and the web UI share the same OpenCode state, so a session can
+be continued from either screen.
 
-Useful things to do inside the session:
+Useful things to do inside the terminal session:
 
 ```bash
 pkg install python nodejs git clang   # the agent may install its own tools
@@ -126,6 +133,7 @@ Long press the terminal to open the menu:
 
 | Action | Description |
 | --- | --- |
+| **Open Web UI** | Return to the main web screen |
 | **Restart OpenCode** | Interrupt the current process and start the TUI again |
 | **Toggle the OpenCode input bar** | Show/hide the floating input field |
 | **Install/Update OpenCode** | Download and install the latest version |

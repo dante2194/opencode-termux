@@ -81,9 +81,10 @@ khỏi môi trường lệnh (`OpenCodeBootstrap.java:579-580`).
 ┌──────────────────────────────────────────────────────────────────────────┐
 │ Android App (com.termux)                                                │
 │                                                                          │
-│  TermuxActivity ──onServiceConnected──► TermuxInstaller.setupBootstrap   │
-│        │                                    (bootstrap Termux: $PREFIX) │
-│        └─► OpenCodeBootstrap.setupIfNeeded(activity, callback)           │
+│  OpenCodeWebActivity (màn hình chính) / TermuxActivity (terminal phụ)    │
+│        │                                                                 │
+│        ├─► TermuxInstaller.setupBootstrapIfNeeded ──► bootstrap $PREFIX  │
+│        └─► OpenCodeBootstrap.setupIfNeeded(context, callback)            │
 │                │                                                         │
 │                ├─► Installer (thread "opencode-setup")                   │
 │                │     1. apt-get  → glibc-repo, glibc-runner, patchelf, tar│
@@ -100,8 +101,10 @@ khỏi môi trường lệnh (`OpenCodeBootstrap.java:579-580`).
         $PREFIX/glibc/lib/ld-linux-aarch64.so.1  ──►  ~/.opencode/installed/opencode-v<ver>
         (loader glibc của Termux)                        (binary glibc đã vá PT_INTERP)
                                     │
-                                    ▼
-                        Session pty ──► "opencode\r" ──► openTUI
+                    ┌───────────────┴────────────────┐
+                    ▼                                ▼
+        OpenCode service 127.0.0.1:49374      Session pty ──► "opencode\r"
+        ──► WebView (màn hình chính)          ──► openTUI (màn phụ)
 ```
 
 ### 2.1. Các thành phần và đường dẫn
@@ -130,7 +133,8 @@ khỏi môi trường lệnh (`OpenCodeBootstrap.java:579-580`).
 | File | Vai trò trong kỹ thuật này |
 | --- | --- |
 | `app/src/main/java/com/termux/app/OpenCodeBootstrap.java` | **Toàn bộ installer** (tải thư viện, tải opencode, vá, launcher, tự sửa, notification). |
-| `app/src/main/java/com/termux/app/TermuxActivity.java` | Nối installer vào vòng đời app: `setupIfNeeded` (mở session), `checkRuntime` (mỗi lần lên foreground), intent `FORCE_UPDATE`. |
+| `app/src/main/java/com/termux/app/OpenCodeWebActivity.java` | Màn hình chính: setup runtime nếu cần, mở web UI, nút mở terminal. |
+| `app/src/main/java/com/termux/app/TermuxActivity.java` | Màn terminal phụ: nối installer vào vòng đời session, `checkRuntime`, intent `FORCE_UPDATE`. |
 | `app/src/main/java/com/termux/app/terminal/TermuxTerminalSessionActivityClient.java` | `startOpenCode()` — ghi `opencode\r` vào pty của session. |
 | `app/src/main/java/com/termux/app/TermuxService.java` | Giữ service + wake lock để OpenCode sống tiếp khi app bị đẩy ra recents. |
 | `app/src/main/java/com/termux/app/terminal/FloatingPromptInput.java` | Lớp phủ nhập liệu cho openTUI (ghi vào pty, không qua HTTP). |
@@ -538,8 +542,8 @@ Các quyết định thiết kế đáng chú ý:
 P="${PREFIX:-/data/data/com.termux/files/usr}"; AM="$P/bin/am"
 [ -x "$AM" ] || { echo "oc-install: the 'am' command is missing (termux-am package). ..." >&2; exit 127; }
 echo "oc-install: asking the OpenCode app to install/update the runtime (watch the notification)"
-exec "$AM" start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER \
-  -n com.termux/com.termux.app.TermuxActivity \
+exec "$AM" start -a android.intent.action.VIEW \
+  -n com.termux/com.termux.app.OpenCodeWebActivity \
   --ez com.termux.opencode.FORCE_UPDATE true >/dev/null 2>&1
 ```
 
@@ -640,14 +644,19 @@ restoreLauncher(new File(OC_INSTALL_PATH), buildOcInstallLauncher());
 ### 10.5. Luồng kiểm soát trong app
 
 ```
-TermuxActivity.onServiceConnected
+OpenCodeWebActivity (launcher, web là màn hình chính)
   └─ TermuxInstaller.setupBootstrapIfNeeded(...)      // bootstrap Termux ($PREFIX)
-       └─ OpenCodeBootstrap.setupIfNeeded(activity, cb)
+       └─ OpenCodeBootstrap.setupIfNeeded(context, cb)
             ├─ runtimeProblems() rỗng ?  → thread nền: bảo trì + cb() ngay
-            └─ không rỗng           → run(activity, force=false, cb)
-                                          └─ Installer (thread "opencode-setup")
-                                               progress: ProgressDialog + Notification
-                                               kết thúc: notifyFinished + runInstallWaiters + cb()
+            └─ không rỗng           → Installer (thread "opencode-setup", cb=null)
+                                          progress: ProgressDialog + Notification
+                                          kết thúc: notifyFinished + runInstallWaiters
+  └─ InstallListener → load web UI (OpenCode service + pair link + cookie)
+
+TermuxActivity (terminal phụ, mở từ nút Terminal)
+  └─ onServiceConnected
+       └─ TermuxInstaller.setupBootstrapIfNeeded(...)
+            └─ OpenCodeBootstrap.setupIfNeeded(activity, cb)
   └─ cb(): addNewSession(...) → startOpenCode(session) → ghi "opencode\r" vào pty
 ```
 
