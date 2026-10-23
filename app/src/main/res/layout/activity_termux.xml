@@ -57,6 +57,15 @@
                         android:background="@null"
                         android:contentDescription="@string/action_open_settings"
                         app:tint="?attr/termuxActivityDrawerImageTint" />
+
+                    <Button
+                        android:id="@+id/open_web_button"
+                        style="?android:attr/buttonBarButtonStyle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="40dp"
+                        android:minWidth="0dp"
+                        android:text="@string/action_open_web"
+                        android:textAllCaps="false" />
                 </LinearLayout>
 
                 <ListView

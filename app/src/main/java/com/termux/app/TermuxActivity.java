@@ -203,6 +203,7 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
     private static final int CONTEXT_MENU_RESTART_OPENCODE_ID = 12;
     private static final int CONTEXT_MENU_UPDATE_OPENCODE_ID = 13;
     private static final int CONTEXT_MENU_TOGGLE_OPENCODE_PROMPT_ID = 14;
+    private static final int CONTEXT_MENU_OPEN_WEB_ID = 15;
 
     private static final String ARG_TERMINAL_TOOLBAR_TEXT_INPUT = "terminal_toolbar_text_input";
     private static final String ARG_ACTIVITY_RECREATED = "activity_recreated";
@@ -261,6 +262,8 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         setTerminalToolbarView(savedInstanceState);
 
         setSettingsButtonView();
+
+        setOpenWebButtonView();
 
         setNewSessionButtonView();
 
@@ -635,6 +638,13 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         });
     }
 
+    private void setOpenWebButtonView() {
+        findViewById(R.id.open_web_button).setOnClickListener(v -> {
+            getDrawer().closeDrawers();
+            openOpenCodeWeb();
+        });
+    }
+
     private void setNewSessionButtonView() {
         View newSessionButton = findViewById(R.id.new_session_button);
         newSessionButton.setOnClickListener(v -> mTermuxTerminalSessionActivityClient.addNewSession(false, null));
@@ -715,6 +725,7 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         menu.add(Menu.NONE, CONTEXT_MENU_REPORT_ID, Menu.NONE, R.string.action_report_issue);
         menu.add(Menu.NONE, CONTEXT_MENU_RESTART_OPENCODE_ID, Menu.NONE, R.string.action_restart_opencode);
         menu.add(Menu.NONE, CONTEXT_MENU_TOGGLE_OPENCODE_PROMPT_ID, Menu.NONE, R.string.action_toggle_opencode_prompt);
+        menu.add(Menu.NONE, CONTEXT_MENU_OPEN_WEB_ID, Menu.NONE, R.string.action_open_web);
         menu.add(Menu.NONE, CONTEXT_MENU_UPDATE_OPENCODE_ID, Menu.NONE, R.string.action_update_opencode);
     }
 
@@ -771,6 +782,9 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
                 return true;
             case CONTEXT_MENU_TOGGLE_OPENCODE_PROMPT_ID:
                 toggleOpenCodePrompt();
+                return true;
+            case CONTEXT_MENU_OPEN_WEB_ID:
+                openOpenCodeWeb();
                 return true;
             case CONTEXT_MENU_UPDATE_OPENCODE_ID:
                 OpenCodeBootstrap.requestUpdate(this);
@@ -1006,6 +1020,16 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
 
         // Keep the device awake, the agent may run long commands.
         acquireWakeLock();
+    }
+
+    /** Open the OpenCode web UI in an in-app WebView. */
+    public void openOpenCodeWeb() {
+        if (!OpenCodeBootstrap.isRuntimeComplete()) {
+            showToast(getString(R.string.opencode_not_installed), true);
+            OpenCodeBootstrap.requestUpdate(this);
+            return;
+        }
+        ActivityUtils.startActivity(this, new Intent(this, OpenCodeWebActivity.class));
     }
 
     /** Interrupt whatever is running and start OpenCode again. */

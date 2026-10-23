@@ -255,5 +255,12 @@
     <string name="action_update_opencode">Install/Update OpenCode</string>
     <string name="action_toggle_opencode_prompt">Toggle the OpenCode input bar</string>
     <string name="opencode_update_requested">Updating OpenCode, watch the notification…</string>
+    <string name="action_open_web">Open Web UI</string>
+    <string name="opencode_web_title">OpenCode Web</string>
+    <string name="opencode_web_back_to_terminal">‹ Terminal</string>
+    <string name="opencode_web_reload">Reload</string>
+    <string name="opencode_web_retry">Retry</string>
+    <string name="opencode_web_starting">Starting the OpenCode web UI…</string>
+    <string name="opencode_web_failed">Could not open the OpenCode web UI.</string>
 
 </resources>
