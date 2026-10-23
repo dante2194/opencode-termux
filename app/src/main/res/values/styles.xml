@@ -6,6 +6,16 @@
         <item name="android:colorAccent">#212121</item>
     </style>
 
+    <!--
+      The startup/setup progress is shown over the black terminal. A dark dialog keeps the black
+      background of the app from flashing to white while the dialog window is being created.
+    -->
+    <style name="Theme.OpenCode.InstallDialog" parent="@android:style/Theme.Material.Dialog.Alert">
+        <item name="android:colorAccent">@color/red_400</item>
+        <item name="android:textColorPrimary">@color/white</item>
+        <item name="android:textColorSecondary">@color/grey_400</item>
+    </style>
+
     <style name="TermuxActivity.Drawer.ButtonBarStyle.Light" parent="@style/Widget.MaterialComponents.Button.TextButton">
         <item name="android:textColor">@color/black</item>
     </style>

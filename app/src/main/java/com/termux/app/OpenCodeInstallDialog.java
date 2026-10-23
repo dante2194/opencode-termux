@@ -16,7 +16,11 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * The dialog that shows the progress of the OpenCode installation.
+ * The dialog that shows the progress of the startup and of the OpenCode installation.
+ *
+ * <p>The same dialog is used for the extraction of the Termux bootstrap packages and for the
+ * installation of glibc and OpenCode, so the startup looks like one continuous step instead of
+ * two separate screens.</p>
  *
  * <p>The dialog is bound to the activity: when the activity goes away the dialog is dismissed,
  * but the installation keeps running in the background. When the user comes back to the app the
@@ -78,7 +82,9 @@ public final class OpenCodeInstallDialog {
             errorView = view.findViewById(R.id.opencode_install_error);
             stepsView = view.findViewById(R.id.opencode_install_steps);
 
-            AlertDialog.Builder builder = new AlertDialog.Builder(activity);
+            // Use a dark theme so that the dialog matches the black terminal and the window does
+            // not flash white while it is being created.
+            AlertDialog.Builder builder = new AlertDialog.Builder(activity, R.style.Theme_OpenCode_InstallDialog);
             builder.setView(view);
             builder.setCancelable(false);
             builder.setPositiveButton(R.string.opencode_install_hide, (d, which) -> {
@@ -146,6 +152,52 @@ public final class OpenCodeInstallDialog {
      * Update
      * ========================================================================================== */
 
+    /**
+     * Show the extraction of the Termux bootstrap packages in the dialog. It is shown before the
+     * OpenCode installation starts, in the very same dialog, so that the startup never switches
+     * between two different screens (and never flashes a white progress dialog). Must be called
+     * on the UI thread.
+     *
+     * @param title   the title of the dialog
+     * @param message the message that describes the current step
+     */
+    public void updateBootstrap(String title, String message) {
+        if (dialog == null || progressView == null) return;
+
+        try {
+            progressView.setIndeterminate(true);
+            percentView.setText("");
+
+            titleView.setText(title == null ? "" : title);
+            messageView.setText(message == null ? "" : message);
+
+            bytesView.setText("");
+            bytesView.setVisibility(View.GONE);
+
+            detailView.setText("");
+            detailView.setVisibility(View.GONE);
+
+            errorView.setVisibility(View.GONE);
+
+            stepsView.setText("");
+            stepsView.setVisibility(View.GONE);
+
+            // There is nothing to retry while the bootstrap is running, but the user may send it
+            // to the background like the installation of OpenCode.
+            Button retryButton = dialog.getButton(DialogInterface.BUTTON_NEGATIVE);
+            if (retryButton != null)
+                retryButton.setVisibility(View.GONE);
+
+            Button hideButton = dialog.getButton(DialogInterface.BUTTON_POSITIVE);
+            if (hideButton != null) {
+                hideButton.setVisibility(View.VISIBLE);
+                hideButton.setText(R.string.opencode_install_hide);
+            }
+        } catch (Exception e) {
+            Logger.logStackTraceWithMessage(LOG_TAG, "Could not update the bootstrap progress in the dialog", e);
+        }
+    }
+
     /** Show the given state in the dialog. Must be called on the UI thread. */
     public void update(final OpenCodeInstallState state) {
         if (state == null || dialog == null || progressView == null) return;
@@ -155,6 +207,7 @@ public final class OpenCodeInstallDialog {
             progressView.setIndeterminate(false);
             progressView.setProgress(percent);
             percentView.setText(percent + "%");
+            stepsView.setVisibility(View.VISIBLE);
 
             messageView.setText(state.message == null ? "" : state.message);
 

@@ -212,6 +212,8 @@ public final class OpenCodeBootstrap {
     private static final Object sLock = new Object();
     /** The installer that is currently running, null when nothing is being installed. */
     private static Installer sInstaller = null;
+    /** True while the silent maintenance of the runtime runs in the background. */
+    private static boolean sMaintenanceRunning = false;
     /** The listeners that want to know about the progress of the installation. */
     private static final List<InstallListener> sListeners = new CopyOnWriteArrayList<>();
     /** The callbacks that are waiting for the installation to finish. */
@@ -240,6 +242,16 @@ public final class OpenCodeBootstrap {
 
         if (!isTermuxBootstrapReady()) {
             Logger.logWarn(LOG_TAG, "The Termux bootstrap is not ready yet, skipping the OpenCode setup.");
+            runOnUiThread(activity, onReady);
+            return;
+        }
+
+        // Nothing has to be downloaded. Refresh the launchers and the patched binary in the
+        // background without showing any progress UI, otherwise the installation dialog would
+        // flash on every cold start even though OpenCode is already installed.
+        if (!isInstallRunning() && runtimeProblems().isEmpty()) {
+            clearFinishedState();
+            maintainInBackground(activity.getApplicationContext());
             runOnUiThread(activity, onReady);
             return;
         }
@@ -300,19 +312,50 @@ public final class OpenCodeBootstrap {
         if (problems.isEmpty()) {
             // Everything is fine, but the binary may have been replaced by the OpenCode
             // auto updater, so make sure it is still patched.
-            new Thread(() -> {
-                try {
-                    Installer installer = new Installer(activity.getApplicationContext(), false);
-                    installer.logOnly = true;
-                    installer.repairOnly();
-                } catch (Exception e) {
-                    Logger.logStackTraceWithMessage(LOG_TAG, "Failed to repair the OpenCode binary", e);
-                }
-            }, "opencode-repair").start();
+            clearFinishedState();
+            maintainInBackground(activity.getApplicationContext());
         } else {
             Logger.logInfo(LOG_TAG, "The OpenCode runtime is incomplete: " + TextUtils.join(", ", problems));
             setupIfNeeded(activity, null);
         }
+    }
+
+    /**
+     * Drop the state of an installation that finished (successfully or not) when the runtime is
+     * complete, so that a stale result is not shown again on the next start.
+     */
+    private static void clearFinishedState() {
+        synchronized (sLock) {
+            if (sInstaller != null) return;
+            sState = new OpenCodeInstallState();
+        }
+        OpenCodeInstallState.clear();
+    }
+
+    /**
+     * Refresh the launchers and repair the patched binary in the background. No progress is
+     * published and no dialog is shown, so this is safe to call on every start of the app.
+     */
+    private static void maintainInBackground(final Context context) {
+        synchronized (sLock) {
+            // Never touch the runtime while an installation is replacing it.
+            if (sInstaller != null || sMaintenanceRunning) return;
+            sMaintenanceRunning = true;
+        }
+
+        new Thread(() -> {
+            try {
+                Installer installer = new Installer(context, false);
+                installer.logOnly = true;
+                installer.doMaintenance();
+            } catch (Exception e) {
+                Logger.logStackTraceWithMessage(LOG_TAG, "Failed to maintain the OpenCode runtime", e);
+            } finally {
+                synchronized (sLock) {
+                    sMaintenanceRunning = false;
+                }
+            }
+        }, "opencode-maintenance").start();
     }
 
     /**
@@ -327,6 +370,13 @@ public final class OpenCodeBootstrap {
 
             OpenCodeInstallState saved = OpenCodeInstallState.load();
             if (saved == null) return;
+
+            // A succeeded or failed installation is stale when the runtime is complete, the app
+            // must not show the result of an earlier run again on every start.
+            if (!saved.running && (saved.done || saved.failed) && runtimeProblems().isEmpty()) {
+                OpenCodeInstallState.clear();
+                return;
+            }
 
             if (saved.running) {
                 // The process was killed, the installation is not running anymore.
@@ -570,14 +620,6 @@ public final class OpenCodeBootstrap {
             deleteQuietly(new File(LEGACY_SETUP_SCRIPT_PATH));
             restoreLauncher(new File(OPENCODE_BIN_PATH), buildOpenCodeLauncher());
             restoreLauncher(new File(OC_INSTALL_PATH), buildOcInstallLauncher());
-            repairInterpreterIfNeeded(context);
-        }
-
-        /**
-         * Only repair the patched binary, without touching anything else. Used when the app comes
-         * to the foreground and the runtime is otherwise complete.
-         */
-        void repairOnly() {
             repairInterpreterIfNeeded(context);
         }
 
@@ -1194,19 +1236,42 @@ public final class OpenCodeBootstrap {
          * already. A launcher written by an older build is replaced, a correct one is kept.
          */
         private void restoreLauncher(File file, String content) {
+            File temp = null;
             try {
                 String current = readTextFile(file);
                 if (current != null && current.contains(LAUNCHER_MARKER))
                     return;
 
-                writeTextFile(file, content);
+                File parent = file.getParentFile();
+                if (parent != null && !parent.isDirectory() && !parent.mkdirs())
+                    throw new IOException("Could not create the directory " + parent);
+
+                // Write to a temporary file and rename it, so that a process that starts the
+                // launcher while the maintenance is running never sees a half written script.
+                temp = File.createTempFile(file.getName(), ".tmp", parent);
+                writeTextFile(temp, content);
                 try {
-                    Os.chmod(file.getAbsolutePath(), 0755);
+                    Os.chmod(temp.getAbsolutePath(), 0755);
                 } catch (Exception e) {
-                    Logger.logStackTraceWithMessage(LOG_TAG, "Could not make " + file + " executable", e);
+                    Logger.logStackTraceWithMessage(LOG_TAG, "Could not make " + temp + " executable", e);
+                }
+
+                if (!temp.renameTo(file)) {
+                    // Some file systems cannot replace an existing file, write it directly.
+                    writeTextFile(file, content);
+                    try {
+                        Os.chmod(file.getAbsolutePath(), 0755);
+                    } catch (Exception e) {
+                        Logger.logStackTraceWithMessage(LOG_TAG, "Could not make " + file + " executable", e);
+                    }
+                    deleteQuietly(temp);
+                    temp = null;
                 }
             } catch (IOException e) {
                 Logger.logStackTraceWithMessage(LOG_TAG, "Could not write the launcher " + file, e);
+            } finally {
+                if (temp != null)
+                    deleteQuietly(temp);
             }
         }
 
