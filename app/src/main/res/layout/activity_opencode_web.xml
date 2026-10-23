@@ -15,12 +15,12 @@
         android:paddingBottom="2dp">
 
         <Button
-            android:id="@+id/opencode_web_close_button"
+            android:id="@+id/opencode_web_terminal_button"
             style="?android:attr/buttonBarButtonStyle"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:minWidth="0dp"
-            android:text="@string/opencode_web_back_to_terminal" />
+            android:text="@string/opencode_web_terminal" />
 
         <TextView
             android:id="@+id/opencode_web_title"

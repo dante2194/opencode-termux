@@ -237,12 +237,12 @@ public final class OpenCodeBootstrap {
      * thread. When an installation is already running, the request is queued and the progress is
      * shown by the listeners.</p>
      */
-    public static void setupIfNeeded(final Activity activity, final Runnable onReady) {
-        if (activity == null) return;
+    public static void setupIfNeeded(final Context context, final Runnable onReady) {
+        if (context == null) return;
 
         if (!isTermuxBootstrapReady()) {
             Logger.logWarn(LOG_TAG, "The Termux bootstrap is not ready yet, skipping the OpenCode setup.");
-            runOnUiThread(activity, onReady);
+            runOnUiThread(context, onReady);
             return;
         }
 
@@ -251,12 +251,10 @@ public final class OpenCodeBootstrap {
         // flash on every cold start even though OpenCode is already installed.
         if (!isInstallRunning() && runtimeProblems().isEmpty()) {
             clearFinishedState();
-            maintainInBackground(activity.getApplicationContext());
-            runOnUiThread(activity, onReady);
+            maintainInBackground(context.getApplicationContext());
+            runOnUiThread(context, onReady);
             return;
         }
-
-        final Context context = activity.getApplicationContext();
 
         final Installer installer;
         synchronized (sLock) {
@@ -1331,8 +1329,9 @@ public final class OpenCodeBootstrap {
             sb.append("P=\"${PREFIX:-").append(PREFIX).append("}\"; AM=\"$P/bin/am\"\n");
             sb.append("[ -x \"$AM\" ] || { echo \"oc-install: the 'am' command is missing (termux-am package).\" >&2; exit 127; }\n");
             sb.append("echo \"oc-install: asking the OpenCode app to install/update the runtime (watch the notification)\"\n");
-            sb.append("exec \"$AM\" start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER \\\n");
-            sb.append("  -n ").append(TermuxConstants.TERMUX_PACKAGE_NAME).append("/com.termux.app.TermuxActivity \\\n");
+            sb.append("exec \"$AM\" start -a android.intent.action.VIEW \\\n");
+            sb.append("  -n ").append(TermuxConstants.TERMUX_PACKAGE_NAME).append("/")
+                .append(OpenCodeWebActivity.class.getName()).append(" \\\n");
             sb.append("  --ez ").append(EXTRA_FORCE_UPDATE).append(" true >/dev/null 2>&1\n");
             return sb.toString();
         }
@@ -1656,7 +1655,7 @@ public final class OpenCodeBootstrap {
                 NotificationManager.IMPORTANCE_LOW);
 
             PendingIntent contentIntent = PendingIntent.getActivity(context, 0,
-                TermuxActivity.newInstance(context), PendingIntent.FLAG_UPDATE_CURRENT);
+                OpenCodeWebActivity.newInstance(context), PendingIntent.FLAG_UPDATE_CURRENT);
 
             Notification.Builder builder = NotificationUtils.geNotificationBuilder(context, NOTIFICATION_CHANNEL_ID,
                 Notification.PRIORITY_LOW, "OpenCode", message, null, contentIntent, null,
@@ -1686,7 +1685,7 @@ public final class OpenCodeBootstrap {
                 NotificationManager.IMPORTANCE_LOW);
 
             PendingIntent contentIntent = PendingIntent.getActivity(context, 0,
-                TermuxActivity.newInstance(context), PendingIntent.FLAG_UPDATE_CURRENT);
+                OpenCodeWebActivity.newInstance(context), PendingIntent.FLAG_UPDATE_CURRENT);
 
             Notification.Builder builder = NotificationUtils.geNotificationBuilder(context, NOTIFICATION_CHANNEL_ID,
                 Notification.PRIORITY_LOW, title, text, null, contentIntent, null,

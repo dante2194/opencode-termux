@@ -3,6 +3,7 @@ package com.termux.app;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
+import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
@@ -18,7 +19,6 @@ import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.ProgressBar;
 import android.widget.TextView;
-import android.widget.Toast;
 
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
@@ -31,12 +31,13 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Shows the OpenCode web UI inside the app.
+ * The main screen of the app: the OpenCode web UI inside an in-app WebView.
  *
- * <p>The UI itself is the web app served by the OpenCode background service. This activity only
- * makes sure that the service is running, obtains a one time pair link from the OpenCode CLI,
- * and lets the WebView establish its own session cookie. The terminal/TUI keeps running in its
- * own Termux session while this activity is open.</p>
+ * <p>The UI itself is the web app served by the OpenCode background service. This activity makes
+ * sure that the Termux bootstrap and the OpenCode runtime are present, starts the service,
+ * obtains a one time pair link from the OpenCode CLI, and lets the WebView establish its own
+ * session cookie. The terminal/OpenTUI is a secondary screen and is opened with the button in
+ * the toolbar.</p>
  */
 public final class OpenCodeWebActivity extends AppCompatActivity {
 
@@ -59,6 +60,9 @@ public final class OpenCodeWebActivity extends AppCompatActivity {
     @Nullable
     private ValueCallback<Uri[]> mFilePathCallback;
 
+    private boolean mStarted = false;
+    private boolean mWebUiStarted = false;
+    private boolean mReloadWebAfterInstall = false;
     private boolean mAuthCompleted = false;
     private boolean mPageError = false;
 
@@ -73,25 +77,36 @@ public final class OpenCodeWebActivity extends AppCompatActivity {
         mStatusText = findViewById(R.id.opencode_web_status_text);
         mRetryButton = findViewById(R.id.opencode_web_retry);
 
-        findViewById(R.id.opencode_web_close_button).setOnClickListener(v -> finish());
+        findViewById(R.id.opencode_web_terminal_button).setOnClickListener(v -> openTerminal());
         findViewById(R.id.opencode_web_reload_button).setOnClickListener(v -> mWebView.reload());
-        mRetryButton.setOnClickListener(v -> loadWebUi());
+        mRetryButton.setOnClickListener(v -> retry());
 
         configureWebView();
+        ensureRuntime();
+    }
 
-        if (!OpenCodeBootstrap.isRuntimeComplete()) {
-            Toast.makeText(this, R.string.opencode_not_installed, Toast.LENGTH_LONG).show();
-            finish();
-            return;
+    @Override
+    protected void onStart() {
+        super.onStart();
+        mStarted = true;
+
+        OpenCodeBootstrap.addInstallListener(mInstallListener);
+        if (TermuxInstaller.isStartupFlowActive()) {
+            TermuxInstaller.showStartupProgress(this, null);
         }
+        refreshInstallState();
+        handleForceUpdateIntent();
 
-        loadWebUi();
+        if (OpenCodeBootstrap.isRuntimeComplete()) maybeLoadWebUi();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         if (mWebView != null) mWebView.onResume();
+        if (OpenCodeBootstrap.isTermuxBootstrapReady()) {
+            OpenCodeBootstrap.checkRuntime(this);
+        }
     }
 
     @Override
@@ -99,6 +114,23 @@ public final class OpenCodeWebActivity extends AppCompatActivity {
         if (mWebView != null) mWebView.onPause();
         CookieManager.getInstance().flush();
         super.onPause();
+    }
+
+    @Override
+    protected void onStop() {
+        mStarted = false;
+        OpenCodeBootstrap.removeInstallListener(mInstallListener);
+        // The dialog belongs to this activity. The installation keeps running in the background
+        // and the progress is shown again by the next activity or when this one comes back.
+        TermuxInstaller.hideStartupProgress(this);
+        super.onStop();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleForceUpdateIntent();
     }
 
     @Override
@@ -125,6 +157,128 @@ public final class OpenCodeWebActivity extends AppCompatActivity {
             super.onBackPressed();
         }
     }
+
+    /** The terminal/OpenTUI is a separate Termux screen, opened from the web toolbar. */
+    private void openTerminal() {
+        startActivity(new Intent(this, TermuxActivity.class));
+    }
+
+    /* ==========================================================================================
+     * Runtime setup
+     * ========================================================================================== */
+
+    /**
+     * Make sure that the Termux bootstrap and the OpenCode runtime are available. The default
+     * Termux progress dialog is shown for the whole setup. Once everything is ready the web UI
+     * is loaded.
+     */
+    private void ensureRuntime() {
+        if (OpenCodeBootstrap.isRuntimeComplete()) {
+            // Refresh launchers and check that the binary is still patched.
+            OpenCodeBootstrap.setupIfNeeded(getApplicationContext(), null);
+            maybeLoadWebUi();
+            return;
+        }
+
+        if (TermuxInstaller.isStartupFlowActive() || OpenCodeBootstrap.isInstallRunning()) {
+            if (!TermuxInstaller.isStartupProgressShowing(this)) {
+                OpenCodeInstallState state = OpenCodeBootstrap.getInstallState();
+                String message = state != null && !OpenCodeInstallState.isEmpty(state.message)
+                    ? state.message : getString(R.string.opencode_installing);
+                TermuxInstaller.showStartupProgress(this, message);
+            }
+            return;
+        }
+
+        if (!OpenCodeBootstrap.isTermuxBootstrapReady()) {
+            TermuxInstaller.setupBootstrapIfNeeded(this, () -> {
+                // This callback is also invoked when this activity was destroyed in the
+                // meantime. The runtime installation is tied to the application, not to one
+                // activity, so keep going and let the next activity show the progress.
+                if (mStarted && !isFinishing() && !isDestroyed()
+                    && !OpenCodeBootstrap.isRuntimeComplete()) {
+                    TermuxInstaller.showStartupProgress(this, getString(R.string.opencode_installing));
+                }
+                Context context = getApplicationContext();
+                OpenCodeBootstrap.setupIfNeeded(context, null);
+            });
+            return;
+        }
+
+        TermuxInstaller.showStartupProgress(this, getString(R.string.opencode_installing));
+        OpenCodeBootstrap.setupIfNeeded(getApplicationContext(), null);
+    }
+
+    /** Re-attach the progress dialog after the activity was recreated or came back to front. */
+    private void refreshInstallState() {
+        OpenCodeInstallState state = OpenCodeBootstrap.getInstallState();
+        if (state == null) return;
+        if (state.running || state.failed) {
+            mInstallListener.onOpenCodeInstallStateChanged(state);
+        } else if (state.done && OpenCodeBootstrap.isRuntimeComplete()) {
+            TermuxInstaller.dismissStartupProgress();
+            maybeLoadWebUi();
+        }
+    }
+
+    /** The `oc-install` command asks the app to update the runtime through this intent. */
+    private void handleForceUpdateIntent() {
+        Intent intent = getIntent();
+        if (intent == null || !intent.getBooleanExtra(OpenCodeBootstrap.EXTRA_FORCE_UPDATE, false))
+            return;
+
+        intent.removeExtra(OpenCodeBootstrap.EXTRA_FORCE_UPDATE);
+        setIntent(intent);
+
+        if (!OpenCodeBootstrap.isRuntimeComplete()) return;
+        mReloadWebAfterInstall = true;
+        TermuxInstaller.showStartupProgress(this, getString(R.string.opencode_installing));
+        OpenCodeBootstrap.requestUpdate(this);
+    }
+
+    private void retry() {
+        mPageError = false;
+        if (!OpenCodeBootstrap.isRuntimeComplete()) {
+            ensureRuntime();
+            return;
+        }
+        loadWebUi();
+    }
+
+    /** Called on the UI thread whenever the OpenCode installation makes progress. */
+    private final OpenCodeBootstrap.InstallListener mInstallListener = state -> {
+        if (state == null || isFinishing() || isDestroyed()) return;
+
+        if (state.running) {
+            if (TermuxInstaller.isStartupProgressShowing(this)) {
+                TermuxInstaller.setStartupProgressMessage(this, state.message);
+            } else {
+                TermuxInstaller.showStartupProgress(this, state.message);
+            }
+            return;
+        }
+
+        if (state.failed) {
+            TermuxInstaller.dismissStartupProgress();
+            showError(state.error);
+            return;
+        }
+
+        if (state.done) {
+            TermuxInstaller.dismissStartupProgress();
+            if (!OpenCodeBootstrap.isRuntimeComplete()) return;
+            if (mReloadWebAfterInstall) {
+                mReloadWebAfterInstall = false;
+                loadWebUi();
+            } else {
+                maybeLoadWebUi();
+            }
+        }
+    };
+
+    /* ==========================================================================================
+     * WebView
+     * ========================================================================================== */
 
     @SuppressWarnings("deprecation")
     private void configureWebView() {
@@ -235,8 +389,14 @@ public final class OpenCodeWebActivity extends AppCompatActivity {
         return true;
     }
 
+    private void maybeLoadWebUi() {
+        if (mWebUiStarted) return;
+        loadWebUi();
+    }
+
     /** Start the service, pair this WebView and load the web UI. */
     private void loadWebUi() {
+        mWebUiStarted = true;
         mPageError = false;
         showStatus(getString(R.string.opencode_web_starting), false);
 
@@ -329,6 +489,12 @@ public final class OpenCodeWebActivity extends AppCompatActivity {
             message += "\n\n" + details.trim();
         }
         showStatus(message, true);
+    }
+
+    public static Intent newInstance(Context context) {
+        Intent intent = new Intent(context, OpenCodeWebActivity.class);
+        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        return intent;
     }
 
     @Override
