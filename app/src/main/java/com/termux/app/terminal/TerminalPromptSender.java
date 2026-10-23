@@ -38,9 +38,12 @@ public final class TerminalPromptSender {
             session.write(text);
         }
 
-        final Runnable enter = () -> {
-            if (mPendingEnter == enter) mPendingEnter = null;
-            if (session.isRunning()) session.write("\r");
+        final Runnable enter = new Runnable() {
+            @Override
+            public void run() {
+                if (mPendingEnter == this) mPendingEnter = null;
+                if (session.isRunning()) session.write("\r");
+            }
         };
 
         mPendingEnter = enter;
