@@ -26,6 +26,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import com.termux.R;
 import com.termux.shared.logger.Logger;
 
+import java.util.Collections;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -254,7 +255,11 @@ public final class OpenCodeWebActivity extends AppCompatActivity {
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed()) return;
                 if (url != null) {
-                    mWebView.loadUrl(url);
+                    // The server only answers the one time pair link with the session cookie
+                    // redirect when the request looks like a browser navigation. WebView sends
+                    // this by default, but be explicit so the pair link can never return JSON.
+                    mWebView.loadUrl(url, Collections.singletonMap(
+                        "Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"));
                 } else {
                     showError(message);
                 }
