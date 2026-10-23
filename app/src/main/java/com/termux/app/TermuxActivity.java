@@ -353,12 +353,28 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        setIntent(intent);
 
         if (intent == null) return;
 
         // The 'oc-install' command asks the app to install or update the OpenCode runtime.
         if (intent.getBooleanExtra(OpenCodeBootstrap.EXTRA_FORCE_UPDATE, false))
             OpenCodeBootstrap.requestUpdate(this);
+
+        String sessionHandle = intent.getStringExtra(EXTRA_SESSION_HANDLE);
+        if (sessionHandle != null && !sessionHandle.isEmpty())
+            switchToSession(sessionHandle);
+    }
+
+    private void switchToSession(String sessionHandle) {
+        TermuxService service = getTermuxService();
+        if (service == null) return;
+
+        TerminalSession session = service.getTerminalSessionForHandle(sessionHandle);
+        if (session == null) return;
+
+        if (mTermuxTerminalSessionActivityClient != null)
+            mTermuxTerminalSessionActivityClient.setCurrentSession(session);
     }
 
     @Override
@@ -445,6 +461,12 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         // The 'oc-install' command asks the app to install or update the OpenCode runtime.
         if (intent != null && intent.getBooleanExtra(OpenCodeBootstrap.EXTRA_FORCE_UPDATE, false))
             OpenCodeBootstrap.requestUpdate(TermuxActivity.this);
+
+        if (intent != null) {
+            String sessionHandle = intent.getStringExtra(EXTRA_SESSION_HANDLE);
+            if (sessionHandle != null && !sessionHandle.isEmpty())
+                switchToSession(sessionHandle);
+        }
 
         if (mTermuxService.isTermuxSessionsEmpty()) {
             if (mIsVisible) {
@@ -1257,9 +1279,25 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         ActivityUtils.startActivity(context, newInstance(context));
     }
 
+    /** Extra used to open a specific terminal session when starting this activity. */
+    public static final String EXTRA_SESSION_HANDLE = "com.termux.app.extra.SESSION_HANDLE";
+
     public static Intent newInstance(@NonNull final Context context) {
         Intent intent = new Intent(context, TermuxActivity.class);
         intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        return intent;
+    }
+
+    public static Intent newInstance(@NonNull final Context context, @Nullable String sessionHandle) {
+        Intent intent = newIntent(context);
+        if (sessionHandle != null && !sessionHandle.isEmpty())
+            intent.putExtra(EXTRA_SESSION_HANDLE, sessionHandle);
+        return intent;
+    }
+
+    public static Intent newIntent(@NonNull final Context context) {
+        Intent intent = new Intent(context, TermuxActivity.class);
+        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         return intent;
     }
 
