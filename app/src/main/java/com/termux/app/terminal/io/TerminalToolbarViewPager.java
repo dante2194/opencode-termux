@@ -68,23 +68,22 @@ public class TerminalToolbarViewPager {
 
                 View.OnClickListener sendListener = v -> {
                     TerminalSession session = mActivity.getCurrentSession();
-                    if (session != null) {
-                        if (session.isRunning()) {
-                            String textToSend = editText.getText().toString();
-                            if (textToSend.length() == 0) textToSend = "\r";
-                            session.write(textToSend);
-                        } else {
-                            mActivity.getTermuxTerminalSessionClient().removeFinishedSession(session);
-                        }
+                    if (session == null) return;
+
+                    if (!session.isRunning()) {
+                        mActivity.getTermuxTerminalSessionClient().removeFinishedSession(session);
                         editText.setText("");
+                        return;
                     }
+
+                    // Always send the newline after the text: the TUI (eg. OpenCode) must execute
+                    // the prompt right away instead of only receiving the typed text. The send
+                    // button is the only way to submit, the keyboard no longer sends.
+                    session.write(editText.getText().toString() + "\r");
+                    editText.setText("");
                 };
 
                 sendButton.setOnClickListener(sendListener);
-                editText.setOnEditorActionListener((v, actionId, event) -> {
-                    sendListener.onClick(v);
-                    return true;
-                });
             }
             collection.addView(layout);
             return layout;
