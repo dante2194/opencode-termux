@@ -12,6 +12,7 @@ import androidx.viewpager.widget.ViewPager;
 
 import com.termux.R;
 import com.termux.app.TermuxActivity;
+import com.termux.app.terminal.TerminalPromptSender;
 import com.termux.shared.termux.extrakeys.ExtraKeysView;
 import com.termux.terminal.TerminalSession;
 
@@ -20,6 +21,7 @@ public class TerminalToolbarViewPager {
     public static class PageAdapter extends PagerAdapter {
 
         final TermuxActivity mActivity;
+        final TerminalPromptSender mPromptSender = new TerminalPromptSender();
         String mSavedTextInput;
 
         public PageAdapter(TermuxActivity activity, String savedTextInput) {
@@ -76,10 +78,11 @@ public class TerminalToolbarViewPager {
                         return;
                     }
 
-                    // Always send the newline after the text: the TUI (eg. OpenCode) must execute
-                    // the prompt right away instead of only receiving the typed text. The send
-                    // button is the only way to submit, the keyboard no longer sends.
-                    session.write(editText.getText().toString() + "\r");
+                    // Paste the text and submit it with Enter shortly afterwards. The TUI
+                    // (eg. OpenCode) then receives the prompt as a single paste instead of a
+                    // burst of raw key presses. The send button is the only way to submit,
+                    // the keyboard no longer sends.
+                    mPromptSender.send(session, editText.getText().toString());
                     editText.setText("");
                 };
 

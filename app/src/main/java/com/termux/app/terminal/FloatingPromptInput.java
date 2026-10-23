@@ -11,25 +11,19 @@ import com.termux.app.TermuxActivity;
 import com.termux.shared.logger.Logger;
 import com.termux.terminal.TerminalSession;
 
-import java.nio.charset.StandardCharsets;
-
 /**
  * A small input bar that is shown at the bottom of the activity.
  *
  * <p>The OpenCode TUI (a full screen terminal application) grabs the soft keyboard for itself,
  * which makes it hard to type a prompt. This view gives the user a dedicated text field: the text
- * is written to the pty of the current session using bracketed paste, exactly like a real
- * terminal would do it.</p>
+ * is pasted into the terminal session, exactly like a real terminal would do it.</p>
  */
 public class FloatingPromptInput {
 
     private static final String LOG_TAG = "FloatingPromptInput";
 
-    /** Bracketed paste markers, see https://en.wikipedia.org/wiki/Bracketed-paste */
-    private static final String BRACKETED_PASTE_START = "\u001b[200~";
-    private static final String BRACKETED_PASTE_END = "\u001b[201~";
-
     private final TermuxActivity mActivity;
+    private final TerminalPromptSender mPromptSender = new TerminalPromptSender();
 
     private View mRootView;
     private EditText mInputView;
@@ -98,8 +92,7 @@ public class FloatingPromptInput {
             return;
         }
 
-        byte[] bytes = (BRACKETED_PASTE_START + text + BRACKETED_PASTE_END + "\r").getBytes(StandardCharsets.UTF_8);
-        session.write(bytes, 0, bytes.length);
+        mPromptSender.send(session, text);
 
         mInputView.setText("");
     }
