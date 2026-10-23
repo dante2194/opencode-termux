@@ -441,40 +441,31 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
 
         if (mTermuxService.isTermuxSessionsEmpty()) {
             if (mIsVisible) {
-                TermuxInstaller.setupBootstrapIfNeeded(TermuxActivity.this,
-                    new TermuxInstaller.BootstrapProgressListener() {
-                        @Override
-                        public void onBootstrapStarted(String message) {
-                            // Show the bootstrap in the same screen that continues with the
-                            // installation of glibc and OpenCode.
-                            showBootstrapProgress(message);
-                        }
-
-                        @Override
-                        public void onBootstrapFailed() {
-                            hideBootstrapProgress();
-                        }
-                    },
-                    () -> {
-                        if (mTermuxService == null) return; // Activity might have been destroyed.
-                        try {
-                            final boolean launchFailsafe = (intent != null && intent.getExtras() != null) &&
-                                intent.getExtras().getBoolean(TERMUX_ACTIVITY.EXTRA_FAILSAFE_SESSION, false);
-                            // The OpenCode runtime must be ready before the agent is started, it is
-                            // installed on the first run and repaired when it is broken.
-                            OpenCodeBootstrap.setupIfNeeded(TermuxActivity.this, () -> {
-                                if (mTermuxService == null) return; // Activity might have been destroyed.
-                                try {
-                                    mTermuxTerminalSessionActivityClient.addNewSession(launchFailsafe, null);
-                                    startOpenCode();
-                                } catch (WindowManager.BadTokenException e) {
-                                    // Activity finished - ignore.
-                                }
-                            });
-                        } catch (WindowManager.BadTokenException e) {
-                            // Activity finished - ignore.
-                        }
-                    });
+                TermuxInstaller.setupBootstrapIfNeeded(TermuxActivity.this, () -> {
+                    if (mTermuxService == null) {
+                        TermuxInstaller.dismissBootstrapProgress();
+                        return; // Activity might have been destroyed.
+                    }
+                    try {
+                        final boolean launchFailsafe = (intent != null && intent.getExtras() != null) &&
+                            intent.getExtras().getBoolean(TERMUX_ACTIVITY.EXTRA_FAILSAFE_SESSION, false);
+                        // The OpenCode runtime must be ready before the agent is started, it is
+                        // installed on the first run and repaired when it is broken. The default
+                        // bootstrap progress dialog stays visible for this whole setup.
+                        OpenCodeBootstrap.setupIfNeeded(TermuxActivity.this, () -> {
+                            TermuxInstaller.dismissBootstrapProgress();
+                            if (mTermuxService == null) return; // Activity might have been destroyed.
+                            try {
+                                mTermuxTerminalSessionActivityClient.addNewSession(launchFailsafe, null);
+                                startOpenCode();
+                            } catch (WindowManager.BadTokenException e) {
+                                // Activity finished - ignore.
+                            }
+                        });
+                    } catch (WindowManager.BadTokenException e) {
+                        // Activity finished - ignore.
+                    }
+                });
             } else {
                 // The service connected while not in foreground - just bail out.
                 finishActivityIfNotFinishing();
@@ -1031,25 +1022,6 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
      * ========================================================================================== */
 
     /**
-     * Show the extraction of the bootstrap packages in the same dialog that continues with the
-     * installation of glibc and OpenCode. This avoids a second, separate progress screen (and the
-     * white flash of the old {@code ProgressDialog}) between the two steps.
-     */
-    private void showBootstrapProgress(String message) {
-        if (mOpenCodeInstallDialog == null)
-            mOpenCodeInstallDialog = new OpenCodeInstallDialog();
-
-        mOpenCodeInstallDialog.attach(this, this::retryOpenCodeInstall);
-        mOpenCodeInstallDialog.updateBootstrap(getString(R.string.bootstrap_installer_title), message);
-    }
-
-    /** Hide the startup progress when the bootstrap failed, the error dialog takes over. */
-    private void hideBootstrapProgress() {
-        if (mOpenCodeInstallDialog != null && !OpenCodeBootstrap.isInstallRunning())
-            mOpenCodeInstallDialog.detach();
-    }
-
-    /**
      * Show the dialog with the progress of the OpenCode installation. The dialog is only shown
      * when something is being installed or when the installation failed, otherwise the terminal
      * is the only thing the user has to see.
@@ -1062,6 +1034,16 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
 
         OpenCodeInstallState state = OpenCodeBootstrap.getInstallState();
         if (state == null) return;
+
+        // The first run is still shown in the default bootstrap progress dialog, do not open the
+        // custom dialog on top of it when the activity is resumed.
+        if (TermuxInstaller.isBootstrapProgressShowing()) {
+            if (state.running) {
+                TermuxInstaller.setBootstrapProgressMessage(state.message);
+                return;
+            }
+            TermuxInstaller.dismissBootstrapProgress();
+        }
 
         if (state.running || state.failed) {
             mOpenCodeInstallDialog.attach(this, this::retryOpenCodeInstall);
@@ -1085,7 +1067,25 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
     private final OpenCodeBootstrap.InstallListener mOpenCodeInstallListener = new OpenCodeBootstrap.InstallListener() {
         @Override
         public void onOpenCodeInstallStateChanged(OpenCodeInstallState state) {
-            if (mOpenCodeInstallDialog == null || state == null) return;
+            if (state == null) return;
+
+            // On the first run the default Termux bootstrap progress dialog is still visible
+            // while glibc and OpenCode are installed. Update its message instead of opening the
+            // custom dialog, so the whole setup uses the same screen.
+            if (TermuxInstaller.isBootstrapProgressShowing()) {
+                if (state.running) {
+                    TermuxInstaller.setBootstrapProgressMessage(state.message);
+                    return;
+                }
+
+                TermuxInstaller.dismissBootstrapProgress();
+
+                if (state.done && !state.failed) return;
+                // A failure falls through to the custom dialog, so the user gets the details and
+                // the retry button.
+            }
+
+            if (mOpenCodeInstallDialog == null) return;
 
             if (state.done && !state.failed) {
                 // Everything is installed, the terminal takes over.

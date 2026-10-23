@@ -2,6 +2,7 @@ package com.termux.app;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.ProgressDialog;
 import android.content.Context;
 import android.os.Build;
 import android.os.Environment;
@@ -43,8 +44,9 @@ import static com.termux.shared.termux.TermuxConstants.TERMUX_STAGING_PREFIX_DIR
  * (1) If $PREFIX already exist, assume that it is correct and be done. Note that this relies on that we do not create a
  * broken $PREFIX directory below.
  * <p/>
- * (2) The progress is reported to the caller, which shows it in the same screen that is used for
- *     the installation of glibc and OpenCode.
+ * (2) The default Termux progress dialog is shown with the "Installing..." message and a
+ *     spinner. It is kept visible while glibc and OpenCode are installed as well, and the caller
+ *     dismisses it when the whole setup is finished.
  * <p/>
  * (3) A staging directory, $STAGING_PREFIX, is cleared if left over from broken installation below.
  * <p/>
@@ -61,34 +63,11 @@ final class TermuxInstaller {
 
     private static final String LOG_TAG = "TermuxInstaller";
 
-    /**
-     * Receives the progress of the extraction of the bootstrap packages. All the callbacks are
-     * invoked on the UI thread.
-     *
-     * <p>The bootstrap no longer shows a progress dialog of its own. The caller shows the progress
-     * in the same screen that is used for the installation of OpenCode, so that the startup looks
-     * like a single continuous step.</p>
-     */
-    interface BootstrapProgressListener {
-        /** Called when the extraction of the bootstrap packages starts. */
-        void onBootstrapStarted(String message);
-
-        /** Called when the extraction failed and the bootstrap error dialog is shown. */
-        void onBootstrapFailed();
-    }
+    /** The default bootstrap progress dialog, shown until the whole setup is finished. */
+    private static volatile ProgressDialog sProgressDialog;
 
     /** Performs bootstrap setup if necessary. */
     static void setupBootstrapIfNeeded(final Activity activity, final Runnable whenDone) {
-        setupBootstrapIfNeeded(activity, null, whenDone);
-    }
-
-    /**
-     * Performs bootstrap setup if necessary.
-     *
-     * @param listener notified about the progress of the extraction, may be {@code null}
-     */
-    static void setupBootstrapIfNeeded(final Activity activity, final BootstrapProgressListener listener,
-                                       final Runnable whenDone) {
         String bootstrapErrorMessage;
         Error filesDirectoryAccessibleError;
 
@@ -140,14 +119,9 @@ final class TermuxInstaller {
             Logger.logInfo(LOG_TAG, "The termux prefix directory \"" + TERMUX_PREFIX_DIR_PATH + "\" does not exist but another file exists at its destination.");
         }
 
-        // The extraction is shown in the screen of the caller, no dialog of our own is used. This
-        // keeps the startup on a single screen instead of flashing a white progress dialog
-        // before the OpenCode installation screen appears.
-        final String progressMessage = activity.getString(R.string.bootstrap_installer_body);
-        activity.runOnUiThread(() -> {
-            if (listener != null)
-                listener.onBootstrapStarted(progressMessage);
-        });
+        // Show the default Termux progress dialog and keep it visible while the rest of the
+        // setup (glibc and OpenCode) runs, so the first start uses a single screen.
+        sProgressDialog = ProgressDialog.show(activity, null, activity.getString(R.string.bootstrap_installer_body), true, false);
 
         new Thread() {
             @Override
@@ -160,28 +134,28 @@ final class TermuxInstaller {
                     // Delete prefix staging directory or any file at its destination
                     error = FileUtils.deleteFile("termux prefix staging directory", TERMUX_STAGING_PREFIX_DIR_PATH, true);
                     if (error != null) {
-                        showBootstrapErrorDialog(activity, listener, whenDone, Error.getErrorMarkdownString(error));
+                        showBootstrapErrorDialog(activity, whenDone, Error.getErrorMarkdownString(error));
                         return;
                     }
 
                     // Delete prefix directory or any file at its destination
                     error = FileUtils.deleteFile("termux prefix directory", TERMUX_PREFIX_DIR_PATH, true);
                     if (error != null) {
-                        showBootstrapErrorDialog(activity, listener, whenDone, Error.getErrorMarkdownString(error));
+                        showBootstrapErrorDialog(activity, whenDone, Error.getErrorMarkdownString(error));
                         return;
                     }
 
                     // Create prefix staging directory if it does not already exist and set required permissions
                     error = TermuxFileUtils.isTermuxPrefixStagingDirectoryAccessible(true, true);
                     if (error != null) {
-                        showBootstrapErrorDialog(activity, listener, whenDone, Error.getErrorMarkdownString(error));
+                        showBootstrapErrorDialog(activity, whenDone, Error.getErrorMarkdownString(error));
                         return;
                     }
 
                     // Create prefix directory if it does not already exist and set required permissions
                     error = TermuxFileUtils.isTermuxPrefixDirectoryAccessible(true, true);
                     if (error != null) {
-                        showBootstrapErrorDialog(activity, listener, whenDone, Error.getErrorMarkdownString(error));
+                        showBootstrapErrorDialog(activity, whenDone, Error.getErrorMarkdownString(error));
                         return;
                     }
 
@@ -207,7 +181,7 @@ final class TermuxInstaller {
 
                                     error = ensureDirectoryExists(new File(newPath).getParentFile());
                                     if (error != null) {
-                                        showBootstrapErrorDialog(activity, listener, whenDone, Error.getErrorMarkdownString(error));
+                                        showBootstrapErrorDialog(activity, whenDone, Error.getErrorMarkdownString(error));
                                         return;
                                     }
                                 }
@@ -218,7 +192,7 @@ final class TermuxInstaller {
 
                                 error = ensureDirectoryExists(isDirectory ? targetFile : targetFile.getParentFile());
                                 if (error != null) {
-                                    showBootstrapErrorDialog(activity, listener, whenDone, Error.getErrorMarkdownString(error));
+                                    showBootstrapErrorDialog(activity, whenDone, Error.getErrorMarkdownString(error));
                                     return;
                                 }
 
@@ -258,26 +232,20 @@ final class TermuxInstaller {
                     activity.runOnUiThread(whenDone);
 
                 } catch (final Exception e) {
-                    showBootstrapErrorDialog(activity, listener, whenDone, Logger.getStackTracesMarkdownString(null, Logger.getStackTracesStringArray(e)));
+                    showBootstrapErrorDialog(activity, whenDone, Logger.getStackTracesMarkdownString(null, Logger.getStackTracesStringArray(e)));
                 }
             }
         }.start();
     }
 
     public static void showBootstrapErrorDialog(Activity activity, Runnable whenDone, String message) {
-        showBootstrapErrorDialog(activity, null, whenDone, message);
-    }
-
-    public static void showBootstrapErrorDialog(Activity activity, BootstrapProgressListener listener,
-                                                Runnable whenDone, String message) {
         Logger.logErrorExtended(LOG_TAG, "Bootstrap Error:\n" + message);
 
         // Send a notification with the exception so that the user knows why bootstrap setup failed
         sendBootstrapCrashReportNotification(activity, message);
 
         activity.runOnUiThread(() -> {
-            if (listener != null)
-                listener.onBootstrapFailed();
+            dismissBootstrapProgress();
             try {
                 new AlertDialog.Builder(activity).setTitle(R.string.bootstrap_error_title).setMessage(R.string.bootstrap_error_body)
                     .setNegativeButton(R.string.bootstrap_error_abort, (dialog, which) -> {
@@ -287,12 +255,40 @@ final class TermuxInstaller {
                     .setPositiveButton(R.string.bootstrap_error_try_again, (dialog, which) -> {
                         dialog.dismiss();
                         FileUtils.deleteFile("termux prefix directory", TERMUX_PREFIX_DIR_PATH, true);
-                        TermuxInstaller.setupBootstrapIfNeeded(activity, listener, whenDone);
+                        TermuxInstaller.setupBootstrapIfNeeded(activity, whenDone);
                     }).show();
             } catch (WindowManager.BadTokenException e1) {
                 // Activity already dismissed - ignore.
             }
         });
+    }
+
+    /** @return true while the default bootstrap progress dialog is visible. */
+    static boolean isBootstrapProgressShowing() {
+        final ProgressDialog dialog = sProgressDialog;
+        return dialog != null && dialog.isShowing();
+    }
+
+    /** Update the message of the default bootstrap progress dialog. */
+    static void setBootstrapProgressMessage(final String message) {
+        final ProgressDialog dialog = sProgressDialog;
+        if (dialog == null || message == null) return;
+        dialog.setMessage(message);
+    }
+
+    /**
+     * Dismiss the default bootstrap progress dialog. It is called when the whole setup is
+     * finished (or failed), not when the bootstrap packages alone have been extracted.
+     */
+    static void dismissBootstrapProgress() {
+        final ProgressDialog dialog = sProgressDialog;
+        sProgressDialog = null;
+        if (dialog == null) return;
+        try {
+            dialog.dismiss();
+        } catch (RuntimeException e) {
+            // Activity already dismissed - ignore.
+        }
     }
 
     private static void sendBootstrapCrashReportNotification(Activity activity, String message) {
