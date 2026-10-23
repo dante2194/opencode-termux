@@ -63,7 +63,7 @@ final class TermuxInstaller {
 
     private static final String LOG_TAG = "TermuxInstaller";
 
-    /** The default bootstrap progress dialog, shown until the whole setup is finished. */
+    /** The default Termux progress dialog, shown until the whole setup is finished. */
     private static volatile ProgressDialog sProgressDialog;
 
     /** Performs bootstrap setup if necessary. */
@@ -121,7 +121,7 @@ final class TermuxInstaller {
 
         // Show the default Termux progress dialog and keep it visible while the rest of the
         // setup (glibc and OpenCode) runs, so the first start uses a single screen.
-        sProgressDialog = ProgressDialog.show(activity, null, activity.getString(R.string.bootstrap_installer_body), true, false);
+        showStartupProgress(activity, activity.getString(R.string.bootstrap_installer_body));
 
         new Thread() {
             @Override
@@ -245,7 +245,7 @@ final class TermuxInstaller {
         sendBootstrapCrashReportNotification(activity, message);
 
         activity.runOnUiThread(() -> {
-            dismissBootstrapProgress();
+            dismissStartupProgress();
             try {
                 new AlertDialog.Builder(activity).setTitle(R.string.bootstrap_error_title).setMessage(R.string.bootstrap_error_body)
                     .setNegativeButton(R.string.bootstrap_error_abort, (dialog, which) -> {
@@ -263,24 +263,44 @@ final class TermuxInstaller {
         });
     }
 
-    /** @return true while the default bootstrap progress dialog is visible. */
-    static boolean isBootstrapProgressShowing() {
+    /**
+     * Show the default Termux progress dialog, or update its message when it is already shown.
+     * The dialog is not cancelled when the bootstrap packages alone have been extracted: it is
+     * kept visible while glibc and OpenCode are installed and is dismissed by
+     * {@link #dismissStartupProgress()} when the whole setup is finished.
+     */
+    static void showStartupProgress(final Activity activity, final String message) {
+        if (activity == null) return;
+
+        final ProgressDialog current = sProgressDialog;
+        if (current != null && current.isShowing()) {
+            if (message != null)
+                current.setMessage(message);
+            return;
+        }
+
+        sProgressDialog = ProgressDialog.show(activity, null,
+            message == null ? activity.getString(R.string.bootstrap_installer_body) : message, true, false);
+    }
+
+    /** @return true while the default startup progress dialog is visible. */
+    static boolean isStartupProgressShowing() {
         final ProgressDialog dialog = sProgressDialog;
         return dialog != null && dialog.isShowing();
     }
 
-    /** Update the message of the default bootstrap progress dialog. */
-    static void setBootstrapProgressMessage(final String message) {
+    /** Update the message of the default startup progress dialog. */
+    static void setStartupProgressMessage(final String message) {
         final ProgressDialog dialog = sProgressDialog;
         if (dialog == null || message == null) return;
         dialog.setMessage(message);
     }
 
     /**
-     * Dismiss the default bootstrap progress dialog. It is called when the whole setup is
+     * Dismiss the default startup progress dialog. It is called when the whole setup is
      * finished (or failed), not when the bootstrap packages alone have been extracted.
      */
-    static void dismissBootstrapProgress() {
+    static void dismissStartupProgress() {
         final ProgressDialog dialog = sProgressDialog;
         sProgressDialog = null;
         if (dialog == null) return;
