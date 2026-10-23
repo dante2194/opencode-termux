@@ -1089,9 +1089,9 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
             // while glibc and OpenCode are installed. Update its message instead of opening the
             // custom dialog, so the whole setup uses the same screen. The dialog is only dropped
             // when the installation finished or failed, never in between.
-            if (TermuxInstaller.isStartupProgressShowing(this)) {
+            if (TermuxInstaller.isStartupProgressShowing(TermuxActivity.this)) {
                 if (state.running) {
-                    TermuxInstaller.setStartupProgressMessage(this, state.message);
+                    TermuxInstaller.setStartupProgressMessage(TermuxActivity.this, state.message);
                     return;
                 }
                 if (!state.done && !state.failed) return;
